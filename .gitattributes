@@ -1,0 +1,31 @@
+# 跨端团队（Windows + Linux）共享同一份代码：换行符必须锁死。
+# 文本一律 LF 入库并检出；只有 Windows 脚本用 CRLF；二进制禁止转换。
+* text=auto eol=lf
+
+*.c        text eol=lf
+*.h        text eol=lf
+*.s        text eol=lf
+*.ld       text eol=lf
+*.txt      text eol=lf
+*.md       text eol=lf
+*.cmake    text eol=lf
+CMakeLists.txt text eol=lf
+*.json     text eol=lf
+*.yaml     text eol=lf
+*.py       text eol=lf
+*.ioc      text eol=lf
+*.mxproject text eol=lf
+
+*.ps1      text eol=crlf
+*.bat      text eol=crlf
+
+*.elf      binary
+*.bin      binary
+*.hex      binary
+*.o        binary
+*.a        binary
+*.pdf      binary
+*.png      binary
+*.jpg      binary
+*.exe      binary
+*.dll      binary

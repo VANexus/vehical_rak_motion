@@ -1,0 +1,30 @@
+# 构建产物与 IDE（本仓独立成 git 仓库）
+build/
+build_*/
+cmake-build-*/
+out/
+*.o
+*.obj
+*.d
+*.su
+*.elf
+*.map
+*.hex
+*.bin
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.iml
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# 本地临时
+*.local
+*.tmp
+__pycache__/
+*.pyc
+
+# 注意：docs/gen/can_protocol.h 虽是生成物，但要提交，
+# 这样单独 clone 本仓的人不用先拿到工作区根的 docs/ 就能编译。
