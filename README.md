@@ -30,6 +30,11 @@ vehical_rak_chassis/
 
 ---
 
+**远端**：`https://github.com/VANexus/vehical_rak_chassis`（private，默认分支 `main`，团队 `RAK-嵌入式开发组` 有 maintain 权限）。
+协作三步：**开工先 `git pull`** → 改动 → **收工 `git add -A && git commit && git push`**；提交前本仓必须 `python3 tools/can_check.py` 与 `cmake --build --preset Debug` 双双零问题。
+
+---
+
 ## 1. 当前状态：CubeMX 骨架 + 已打通构建，业务代码 0 行
 
 | 项 | 状态 |

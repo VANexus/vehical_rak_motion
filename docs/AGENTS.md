@@ -118,13 +118,14 @@ cmake --preset Debug && cmake --build --preset Debug
 
 | 仓 | 内容 | 现状 |
 | --- | --- | --- |
-| `vehical_rak_chassis/` | 底盘 MCU 固件 | 已 `git init`（main），**尚未首次提交**；自包含可单独 clone 编译 |
-| `vehical_rak_arm/` | 机械臂 MCU 固件 | 同上 |
+| `vehical_rak_chassis/` | 底盘 MCU 固件 | **已推送** `VANexus/vehical_rak_chassis`（private，main）；团队 `rak-2`（RAK-嵌入式开发组）= maintain |
+| `vehical_rak_arm/` | 机械臂 MCU 固件 | **已推送** `VANexus/vehical_rak_arm`（private，main）；团队 `rak-2` = maintain |
 | `rak/` | Jetson 上位机（ROS 2 colcon） | 有远端（`VANexus/rak`）。本地领先 origin 1 个 snapshot 提交 + 有脏文件；Orin 停在更早 HEAD + 34 个脏文件 → **先对齐** |
 | 工作区根（伞形） | `docs/`（规范件源）、`tools/`、`env/`、`AGENTS.md`、`README.md` | 已 `git init`；`.gitignore` **不纳管**上面三个子仓 |
 
 规则：
 
+0. **两个 MCU 仓的远端在组织 `VANexus` 下**（与 `rak` 同组织）：`github.com/VANexus/vehical_rak_chassis`、`github.com/VANexus/vehical_rak_arm`，均 private，已授 `rak-2`（RAK-嵌入式开发组）maintain。
 1. **规范件只能在伞形仓改**：`docs/protocol.md`、`docs/protocol-signals.yaml`、`docs/board-c30d.md`、`docs/architecture.md`、`AGENTS.md`、`tools/*.py`。改完跑 `python3 tools/sync_docs.py` 把它同步进两个 MCU 仓，**源与拷贝同一次提交**。
 2. `sync_docs.py --check` 是漂移门禁（退出码 1 = 有人在仓里直改了副本）；各仓内的 `docs/PROTOCOL.md` 等**永远是同步产物，不直接编辑**。工具会顺手重写文内链接，使副本在仓内视角下依然可点。
 3. 提交前在本仓跑：`python3 tools/can_check.py`（协议）+ `cmake --build --preset Debug`（构建），两者零问题。`Drivers/`、`Middlewares/` **要入库**（保证单独 clone 能编译）；`build/`、`cmake-build-*/`、`.idea/` 不入库。
