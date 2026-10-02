@@ -1,3 +1,5 @@
+> **两份副本约定**：本文件在 `vehical_rak_chassis` 与 `vehical_rak_arm` 各存一份，内容必须保持一致——改动时**同一批提交两个仓**（手工 cp 即可，没有同步工具）。
+
 # C30D 板级资源表（权威）
 
 **唯一出处**：`../car2/tools/references/smart-transport-robot/01_课程设计-智能搬运机器人/装配参考资料/手册文档/STM32F407VET6(C30D-V2.1_V2.2)主板资源分配说明.pdf`（标题写 C30D-**V2.0**，正文按 V2.1/V2.2 文件名收录；以手中 PCB 丝印再对一次）。

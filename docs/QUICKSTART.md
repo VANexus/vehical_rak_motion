@@ -25,13 +25,13 @@
 ## 2. 加载环境（每次开工）
 
 ```bash
-. ../env/activate.sh          # Linux / macOS（bash 与 zsh 都实测可用）
+. ./env/activate.sh          # Linux / macOS（bash 与 zsh 都实测可用）
 ```
 ```powershell
-. ..\env\activate.ps1         # Windows PowerShell
+. .\env\activate.ps1         # Windows PowerShell
 ```
 
-找不到 CubeCLT 就显式指定：`STM32CubeCLT_DIR=/你的路径 . ../env/activate.sh`。
+找不到 CubeCLT 就显式指定：`STM32CubeCLT_DIR=/你的路径 . ./env/activate.sh`。
 加载成功后会打印编译器/cmake/ninja/烧录工具的绝对路径——**先确认这几行再报"编译不过"**。
 
 ## 3. 构建
@@ -93,6 +93,6 @@ STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_cha
 | [`docs/BOARD-C30D.md`](BOARD-C30D.md) | **板级引脚与外设资源表**（硬件真相） |
 | [`docs/gen/can_protocol.h`](gen/can_protocol.h) | 由校验器生成的帧宏，MCU 侧直接 include |
 | [`tools/can_check.py`](../tools/can_check.py) | 协议校验器 + 参考编解码（`python3 tools/can_check.py` 必须退出码 0） |
-| 工作区根 [`../AGENTS.md`](AGENTS.md) | 跨端工具链、代码分层、上板规矩 |
+| 工作区根 [`AGENTS.md`](../AGENTS.md) | 跨端工具链、代码分层、上板规矩 |
 
-⚠️ `docs/PROTOCOL.md`、`docs/BOARD-C30D.md`、`docs/protocol-signals.yaml`、`docs/gen/*`、`tools/can_check.py` 是**同步产物**（`tools/sync_docs.py` 从工作区根拷来），**不要在本仓直接改**；改源，再同步。
+约定：`docs/PROTOCOL.md`、`docs/BOARD-C30D.md`、`docs/protocol-signals.yaml`、`tools/can_check.py`、`env/activate.*` 在本仓各存一份（与姊妹仓内容保持一致，改动时同一批 `cp` 过去）；`docs/gen/can_protocol.h` 由 `can_check.py --c-header` 生成，不手改。

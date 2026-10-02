@@ -1,3 +1,5 @@
+> **两份副本约定**：本文件在 `vehical_rak_chassis` 与 `vehical_rak_arm` 各存一份，内容必须保持一致——改动时**同一批提交两个仓**（手工 cp 即可，没有同步工具）。
+
 # CAN 通信协议 v3（三端对接规范，规范性文档）
 
 适用范围：Jetson（`rak`）↔ 底盘 F407（`vehical_rak_chassis`）↔ 机械臂 F407（`vehical_rak_arm`）。
