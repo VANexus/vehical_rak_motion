@@ -36,16 +36,16 @@ vehical_rak_chassis/
 
 ---
 
-## 1. 当前状态：R2 —— 轮子全栈已移植，MX 时钟/时基已切 HSE+TIM7
+## 1. 当前状态：R3（板上运行中）—— 全栈移植 + HSE/TIM7 + boot 解耦修复
 
 > 移植与版本细节见交接文档（`../car/README4.md`）。业务代码在 `Core/Src/app_car.c`（电机/编码器/OLED/ADC/IWDG/TIM6 25kHz ISR/舵机/串口）与 `Core/Src/app_can.c`（CAN v3）。
 
 | 项 | 状态 |
 | --- | --- |
-| CubeMX 生成 | ✅ FW_F4 V1.28.3，TargetToolchain=CMake；R2 重生成通过（时基 TIM7 + HSE 8MHz 时钟树） |
+| CubeMX 生成 | ✅ FW_F4 V1.28.3，TargetToolchain=CMake；R2/R3 验证通过（时基 TIM7 + HSE 8MHz 时钟树；R3 修复 boot 对 HAL tick 的依赖） |
 | Debug / Release 构建 | ✅ 双配置零警告（Windows 实测，Debug FLASH 36.4KB / RAM 45.3KB） |
-| 应用代码 | ✅ R2：25kHz 闭环 + CAN v3 + 舵机 + 串口遥控 + 台架自检（寄存器级，见 `docs` 交接文档 §四 的 LL/寄存器裁决） |
-| 上板运行 | ❌ 未烧录实测（R1/R2 均未上板） |
+| 应用代码 | ✅ R3：25kHz 闭环 + CAN v3 + 舵机 + 串口遥控 + 台架自检（寄存器级，LL/寄存器裁决见交接文档 §六） |
+| 上板运行 | ✅ R3 已上板运行（2026-10-03：uwTick 单调无复位；台架确认进行中） |
 | 外设配置 | MX 侧仅 FREERTOS/NVIC/RCC/SYS（时基 TIM7）；**电机/编码器/CAN/OLED/ADC/IWDG 由应用代码寄存器级实现**（不走 MX，防重生成覆盖） |
 
 ---
@@ -149,4 +149,4 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 - `four-motor-25k/main.c`（car2 台架归档，未纳入本仓）：裸机版电机/编码器/OLED/ADC 寄存器操作参考（**金标准台架代码**，移植时改成 HAL，别直接抄进本工程）。
 - `../car2/tools/references/smart-transport-robot/`：同板完整课设（底盘 `chassis/mecanum.c`、`motor_ctrl.c`、`calib.c`，IMU 打法）。
 
-*最后更新：2026-10-03（R2：时基 TIM7 + HSE 时钟树；全栈移植状态见 §1）。改动构建方式或外设结论时请同步本文件。*
+*最后更新：2026-10-03（R3：上板运行；R2 挂死取证与修复见 `../car/README4.md` §二/§三）。改动构建方式或外设结论时请同步本文件。*
