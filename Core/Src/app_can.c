@@ -264,5 +264,6 @@ void can_tx_task_step(uint32_t now_ms)
         d[6] = (uint8_t)((ni_seq++ & 0xFU) << 4);
         d[7] = crc8(d, 7U, DID_NODEINFO);
         (void)can_tx(2U, CID_NODEINFO, d);
+        serial_push_text(SERIAL_BANNER);   /* [AI]  R15: 串口识别横幅 @1Hz */
     }
 }

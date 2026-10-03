@@ -21,7 +21,7 @@ struct serial_rx {
 };
 
 static struct serial_rx ser_rx[SERIAL_PORTS];
-static uint8_t ser_txq[SERIAL_PORTS][32];
+static uint8_t ser_txq[SERIAL_PORTS][64];   /* [AI] R15: 32→64,给横幅留余量 */
 static volatile uint8_t ser_tx_rd[SERIAL_PORTS], ser_tx_wr[SERIAL_PORTS];
 
 static void serial_parse(struct serial_rx *s, uint8_t b)
@@ -95,6 +95,18 @@ void serial_push_feedback(const uint8_t *d)
             uint8_t next = (uint8_t)((ser_tx_wr[u] + 1U) % sizeof(ser_txq[0]));
             if (next == ser_tx_rd[u]) break;
             ser_txq[u][ser_tx_wr[u]] = d[i];
+            ser_tx_wr[u] = next;
+        }
+    }
+}
+
+void serial_push_text(const char *s)
+{
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
+        for (const char *p = s; *p != '\0'; ++p) {
+            uint8_t next = (uint8_t)((ser_tx_wr[u] + 1U) % sizeof(ser_txq[0]));
+            if (next == ser_tx_rd[u]) break;
+            ser_txq[u][ser_tx_wr[u]] = (uint8_t)*p;
             ser_tx_wr[u] = next;
         }
     }
