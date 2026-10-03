@@ -51,6 +51,10 @@ static int16_t arm_fault_code;        /* [AI]  0x031: 机械臂故障码（暂�
 static int16_t arm_j4_pos, arm_base_pos;
 static uint8_t last_cmd_cnt;          /* [AI]  0x100 计数器校验（低4位） */
 
+/* [AI]  串口回读链路(can_tx_task_step 调用,定义在文件后段) */
+void serial_push_feedback(const uint8_t *d);
+void serial_poll_tx(void);
+
 static uint8_t crc8_id(const uint8_t *p, uint8_t n, uint8_t init)
 {
     uint8_t crc = init;
@@ -200,7 +204,7 @@ static int can_tx(uint32_t std_id, const uint8_t *d)
     return 1;
 }
 
-/* [AI]  Task_CAN_Tx：1kHz —— 0x030(互锁)每帧 + 0x200(反馈)每 10 帧 */
+/* [AI]  Task_CAN_Tx：1kHz —— 串口回读续发 + 0x030(互锁)每帧 + 0x200(反馈)每 10 帧 */
 void can_tx_task_step(uint32_t now_ms)
 {
     static unsigned div;
@@ -209,6 +213,7 @@ void can_tx_task_step(uint32_t now_ms)
     uint8_t d[8];
 
     (void)now_ms;
+    serial_poll_tx();                                    /* 1kHz 续发串口回读 */
     car_get_velocity(&vx, &vy, &wz);
     put_le16(&d[0], vx);
     put_le16(&d[2], vy);
@@ -221,11 +226,11 @@ void can_tx_task_step(uint32_t now_ms)
         div = 0U;
         uint8_t st = car_can_status();
         uint8_t flags = (uint8_t)((st & 0x03U) |          /* mode bit0-1 */
-                                  (st & 0x04U ? 0x04U : 0U) |  
-                                  (st & 0x08U ? 0x08U : 0U));  /* [AI]  fault 有效 */
+                                  (st & 0x0CU));          /* fault/estop bit2-3 */
         d[6] = (uint8_t)(((fb_cnt & 0xFU) << 4) | flags);
         d[7] = crc8_id(d, 7U, DID_VEL_FB);
         (void)can_tx(CID_VEL_FB, d);                     /* 0x200 @100 Hz */
+        serial_push_feedback(d);                         /* [AI]  串口同帧回读(双 Type-C) */
 
         if ((st & 0x08U) != 0U) {
             /* [AI]  TODO: EMCY 0x020 事件帧首发+重发 3 次（§3），暂随 DIAG 上报 */
@@ -368,9 +373,6 @@ void serial_poll_tx(void)
 #define SERVO_MIN_US   500U
 #define SERVO_MAX_US  2500U
 #define SERVO_MID_US  1500U
-#define SERVO_BOOT_SWEEP 0   /* [AI]  R3: 开机阻塞扫描已移除——它依赖 HAL tick 的
-                                    HAL_Delay,R2 实测 tick 死亡后 boot 永久挂死;
-                                    舵机联动改由 USER 键路径的非阻塞 servo_demo 驱动 */
 #define PC_GROUP_MASK  0x03C0UL
 
 static volatile uint16_t servo_pc_us = SERVO_MID_US;
@@ -418,15 +420,8 @@ void servo_init(void)
     TIM12->CCR2 = SERVO_MID_US;
     TIM12->EGR = TIM_EGR_UG;
     TIM12->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
-
-#if SERVO_BOOT_SWEEP
-    servo_set_us(2, 1000U);  HAL_Delay(400);   /* [AI]  PB15 5V5 座自检 */
-    servo_set_us(2, 2000U);  HAL_Delay(400);
-    servo_set_us(2, SERVO_MID_US); HAL_Delay(200);
-    servo_set_us(0, 1000U);  HAL_Delay(400);   /* [AI]  PC 组同步扫一次 */
-    servo_set_us(0, 2000U);  HAL_Delay(400);
-    servo_set_us(0, SERVO_MID_US); HAL_Delay(200);
-#endif
+    /* [AI]  开机不做阻塞扫描(R2 教训:boot 依赖 HAL tick 会挂死);
+       舵机联动由 USER 键路径的非阻塞 servo_demo 驱动 */
 }
 
 void TIM8_TRG_COM_TIM14_IRQHandler(void)

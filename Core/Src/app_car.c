@@ -103,7 +103,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R3";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R4";   /* [AI]  extern 声明在 app_car.h */
 static uint8_t frame[8][128];
 
 /* ---- time base: HAL tick ---- */
@@ -359,36 +359,37 @@ static void button_init(void)
     GPIOE->PUPDR = (GPIOE->PUPDR & ~3U) | 1U;
 }
 
-/* 0 = none, 1 = short press (edge), 2 = long press (held >= 1.2 s) */
+/* 0 = none, 1 = short press (release edge, held < LONG_PRESS_MS),
+   2 = long press (fired once while held >= LONG_PRESS_MS) */
+#define BTN_DEBOUNCE_MS  30U
+#define LONG_PRESS_MS    1200U
 static int button_pressed_event(uint32_t now)
 {
-    static int armed;
-    static uint32_t release_since;
+    static uint8_t stable;        /* 已消抖的生效电平 */
+    static uint8_t raw_prev;
+    static uint32_t changed_at;
     static uint32_t pressed_at;
-    static uint8_t down;
     static uint8_t long_fired;
-    int pressed = ((GPIOE->IDR & 1U) == 0U);
+    uint8_t raw = (uint8_t)((GPIOE->IDR & 1U) == 0U);
     int ev = 0;
 
-    if (pressed) {
-        release_since = 0;
-        if (down) {
-            if (long_fired == 0U && (uint32_t)(now - pressed_at) >= 1200U) {
-                long_fired = 1U;
-                ev = 2;
-            }
-        } else {
-            down = 1U;
+    if (raw != raw_prev) {
+        raw_prev = raw;
+        changed_at = now;
+    }
+    if (raw != stable && (uint32_t)(now - changed_at) >= BTN_DEBOUNCE_MS) {
+        stable = raw;
+        if (stable != 0U) {
             pressed_at = now;
             long_fired = 0U;
-            if (armed) { armed = 0; ev = 1; }   /* press edge (debounced) */
+        } else if (long_fired == 0U) {
+            ev = 1;               /* [AI]  短按在释放沿确认,避免吞掉长按 */
         }
-    } else {
-        down = 0;
-        if (armed == 0) {
-            if (release_since == 0U) release_since = now;
-            if ((uint32_t)(now - release_since) >= 100U) armed = 1;
-        }
+    }
+    if (stable != 0U && long_fired == 0U &&
+        (uint32_t)(now - pressed_at) >= LONG_PRESS_MS) {
+        long_fired = 1U;
+        ev = 2;
     }
     return ev;
 }
