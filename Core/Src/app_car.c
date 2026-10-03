@@ -103,14 +103,20 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R2";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R3";   /* [AI]  extern 声明在 app_car.h */
 static uint8_t frame[8][128];
 
 /* ---- time base: HAL tick ---- */
 static void delay_ms(uint32_t n)
 {
-    uint32_t begin = HAL_GetTick();
-    while ((uint32_t)(HAL_GetTick() - begin) < n) { __NOP(); }
+    /* [AI]  R3: 改用 DWT 循环计数,不再依赖 HAL 时基——R2 取证发现 HAL tick
+       会在 car_init 后段(TIM6 启动附近)停止,boot 路径任何 HAL_GetTick
+       忙等都可能永久挂死;DWT 在 M4 上恒可用,与中断状态无关 */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t start = DWT->CYCCNT;
+    uint32_t span = n * (SystemCoreClock / 1000U);
+    while ((uint32_t)(DWT->CYCCNT - start) < span) { __NOP(); }
 }
 
 /* ---- OLED (soft SPI on PD11..PD14, proven code) ---- */
@@ -938,6 +944,19 @@ void car_init(void)
     battery_adc_init();
     oled_init();
     watchdog_init();
+    /* [AI]  R3: pid_timer_init() 不再在此调用——25kHz 中断推迟到调度器
+       启动后由 task_control 首拍触发 car_start_control_isr()。R2 取证:
+       tick 恰在本函数后段(TIM6 启动)死亡,推迟后 boot 与实时中断解耦,
+       且即使故障再现,任务仍由 SysTick 驱动可继续运行/喂狗/显示 */
+}
+
+void car_start_control_isr(void)
+{
+    /* [AI]  R3: 25kHz 控制 ISR 的启动点,从 car_init 推迟到调度器运行后。
+       只允许启动一次;Task_Control 首拍调用。 */
+    static uint8_t started;
+    if (started != 0U) return;
+    started = 1U;
     pid_timer_init();
 }
 

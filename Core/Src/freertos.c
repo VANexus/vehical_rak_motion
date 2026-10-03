@@ -143,6 +143,7 @@ static void task_control(void *argument)
 {
   (void)argument;
   TickType_t last = xTaskGetTickCount();
+  car_start_control_isr();   /* [AI]  R3: 25kHz ISR 延迟到调度器启动后开 */
   for (;;) {
     car_control_step(HAL_GetTick());
     vTaskDelayUntil(&last, pdMS_TO_TICKS(10));      /* 100 Hz */

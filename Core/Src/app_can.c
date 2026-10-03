@@ -368,7 +368,9 @@ void serial_poll_tx(void)
 #define SERVO_MIN_US   500U
 #define SERVO_MAX_US  2500U
 #define SERVO_MID_US  1500U
-#define SERVO_BOOT_SWEEP 1
+#define SERVO_BOOT_SWEEP 0   /* [AI]  R3: 开机阻塞扫描已移除——它依赖 HAL tick 的
+                                    HAL_Delay,R2 实测 tick 死亡后 boot 永久挂死;
+                                    舵机联动改由 USER 键路径的非阻塞 servo_demo 驱动 */
 #define PC_GROUP_MASK  0x03C0UL
 
 static volatile uint16_t servo_pc_us = SERVO_MID_US;

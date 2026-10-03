@@ -13,6 +13,7 @@
 extern const char build_tag[];   /* [AI]  版本标签，单点定义在 app_car.c */
 
 void car_init(void);
+void car_start_control_isr(void);      /* [AI]  R3: 25kHz ISR 启动点,Task_Control 首拍调用 */
 void car_control_step(uint32_t now);   /* 100 Hz, Task_Control */
 void car_display_step(uint32_t now);   /* OLED refresh, Task_Status */
 void car_feed_watchdog(void);          /* Task_Status */
