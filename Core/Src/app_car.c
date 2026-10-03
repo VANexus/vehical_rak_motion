@@ -4,7 +4,6 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include <stdint.h>
-#include <stdio.h>
 
 /* Port of the bench-verified four-motor-25k firmware (C2) on top of the
    CubeMX HAL skeleton. Control logic is byte-for-byte the proven one;
@@ -15,7 +14,6 @@
    *4 quadrature *30:1 = 61440; 61600 is the hand-measured value. */
 #define ENCODER_COUNTS_PER_REV 61600L
 #define SAMPLE_MS 10U
-#define DISPLAY_MS 200U
 #define PWM_HZ 25000U
 #define MAX_DUTY_PERCENT 85U
 #define MOTOR_TIMEOUT_MS 90000U
@@ -103,141 +101,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R4";   /* [AI]  extern 声明在 app_car.h */
-static uint8_t frame[8][128];
-
-/* ---- time base: HAL tick ---- */
-static void delay_ms(uint32_t n)
-{
-    /* [AI]  R3: 改用 DWT 循环计数,不再依赖 HAL 时基——R2 取证发现 HAL tick
-       会在 car_init 后段(TIM6 启动附近)停止,boot 路径任何 HAL_GetTick
-       忙等都可能永久挂死;DWT 在 M4 上恒可用,与中断状态无关 */
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    uint32_t start = DWT->CYCCNT;
-    uint32_t span = n * (SystemCoreClock / 1000U);
-    while ((uint32_t)(DWT->CYCCNT - start) < span) { __NOP(); }
-}
-
-/* ---- OLED (soft SPI on PD11..PD14, proven code) ---- */
-static void pin_set(unsigned pin, int high)
-{
-    GPIOD->BSRR = high ? (1UL << pin) : (1UL << (pin + 16U));
-}
-
-static void oled_byte(uint8_t value, int data)
-{
-    pin_set(11, data);
-    for (unsigned bit = 0; bit < 8; ++bit) {
-        pin_set(14, 0);
-        pin_set(13, (value & 0x80U) != 0);
-        pin_set(14, 1);
-        value <<= 1;
-    }
-}
-
-static void oled_cmd(uint8_t value) { oled_byte(value, 0); }
-static void oled_data(uint8_t value) { oled_byte(value, 1); }
-
-static void oled_init(void)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
-    (void)RCC->AHB1ENR;
-    for (unsigned pin = 11; pin <= 14; ++pin) {
-        GPIOD->MODER = (GPIOD->MODER & ~(3UL << (2U * pin))) | (1UL << (2U * pin));
-        GPIOD->OTYPER &= ~(1UL << pin);
-        GPIOD->PUPDR &= ~(3UL << (2U * pin));
-    }
-    pin_set(14, 1);
-    pin_set(12, 0);
-    delay_ms(100);
-    pin_set(12, 1);
-    delay_ms(10);
-    oled_cmd(0xAE);
-    oled_cmd(0xD5); oled_cmd(0x50);
-    oled_cmd(0xA8); oled_cmd(0x3F);
-    oled_cmd(0xD3); oled_cmd(0x00);
-    oled_cmd(0x40);
-    oled_cmd(0x8D); oled_cmd(0x14);
-    oled_cmd(0x20); oled_cmd(0x02);
-    oled_cmd(0xA0); oled_cmd(0xC0);
-    oled_cmd(0xDA); oled_cmd(0x12);
-    oled_cmd(0x81); oled_cmd(0xEF);
-    oled_cmd(0xD9); oled_cmd(0xF1);
-    oled_cmd(0xDB); oled_cmd(0x30);
-    oled_cmd(0xA4); oled_cmd(0xA6);
-    oled_cmd(0xAF);
-}
-
-static const uint8_t font[59][5] = {
-    ['+' - ' '] = {0x08, 0x08, 0x3E, 0x08, 0x08},
-    ['-' - ' '] = {0x08, 0x08, 0x08, 0x08, 0x08},
-    ['.' - ' '] = {0x00, 0x60, 0x60, 0x00, 0x00},
-    ['0' - ' '] = {0x3E, 0x51, 0x49, 0x45, 0x3E},
-    ['1' - ' '] = {0x00, 0x42, 0x7F, 0x40, 0x00},
-    ['2' - ' '] = {0x42, 0x61, 0x51, 0x49, 0x46},
-    ['3' - ' '] = {0x21, 0x41, 0x45, 0x4B, 0x31},
-    ['4' - ' '] = {0x18, 0x14, 0x12, 0x7F, 0x10},
-    ['5' - ' '] = {0x27, 0x45, 0x45, 0x45, 0x39},
-    ['6' - ' '] = {0x3C, 0x4A, 0x49, 0x49, 0x30},
-    ['7' - ' '] = {0x01, 0x71, 0x09, 0x05, 0x03},
-    ['8' - ' '] = {0x36, 0x49, 0x49, 0x49, 0x36},
-    ['9' - ' '] = {0x06, 0x49, 0x49, 0x29, 0x1E},
-    [':' - ' '] = {0x00, 0x36, 0x36, 0x00, 0x00},
-    ['A' - ' '] = {0x7E, 0x11, 0x11, 0x11, 0x7E},
-    ['B' - ' '] = {0x7F, 0x49, 0x49, 0x49, 0x36},
-    ['C' - ' '] = {0x3E, 0x41, 0x41, 0x41, 0x22},
-    ['D' - ' '] = {0x7F, 0x41, 0x41, 0x22, 0x1C},
-    ['E' - ' '] = {0x7F, 0x49, 0x49, 0x49, 0x41},
-    ['F' - ' '] = {0x7F, 0x09, 0x09, 0x09, 0x01},
-    ['G' - ' '] = {0x3E, 0x41, 0x49, 0x49, 0x7A},
-    ['L' - ' '] = {0x7F, 0x40, 0x40, 0x40, 0x40},
-    ['M' - ' '] = {0x7F, 0x02, 0x0C, 0x02, 0x7F},
-    ['N' - ' '] = {0x7F, 0x04, 0x08, 0x10, 0x7F},
-    ['O' - ' '] = {0x3E, 0x41, 0x41, 0x41, 0x3E},
-    ['P' - ' '] = {0x7F, 0x09, 0x09, 0x09, 0x06},
-    ['R' - ' '] = {0x7F, 0x09, 0x19, 0x29, 0x46},
-    ['S' - ' '] = {0x46, 0x49, 0x49, 0x49, 0x31},
-    ['T' - ' '] = {0x01, 0x01, 0x7F, 0x01, 0x01},
-    ['U' - ' '] = {0x3F, 0x40, 0x40, 0x40, 0x3F},
-    ['V' - ' '] = {0x1F, 0x20, 0x40, 0x20, 0x1F},
-    ['W' - ' '] = {0x3F, 0x40, 0x38, 0x40, 0x3F},
-    ['Y' - ' '] = {0x07, 0x08, 0x70, 0x08, 0x07},
-};
-
-static void pixel(unsigned x, unsigned y)
-{
-    if (x < 128 && y < 64) {
-        unsigned page = (y / 16U) * 2U + ((y % 16U) / 8U);
-        frame[page][x] |= (uint8_t)(1U << (y % 8U));
-    }
-}
-
-static void glyph(unsigned x, unsigned y, char c)
-{
-    if (c < ' ' || c > 'Z') c = ' ';
-    for (unsigned col = 0; col < 5; ++col) {
-        uint8_t bits = font[(unsigned)(c - ' ')][col];
-        for (unsigned row = 0; row < 7; ++row) {
-            if (bits & (1U << row)) pixel(x + col, y + row);
-        }
-    }
-}
-
-static void display_text(unsigned x, unsigned y, const char *s)
-{
-    for (unsigned i = 0; s[i] && x + i * 6U < 128; ++i)
-        glyph(x + i * 6U, y, s[i]);
-}
-
-static void oled_show(void)
-{
-    for (unsigned page = 0; page < 8; ++page) {
-        oled_cmd((uint8_t)(0xB0U + page));
-        oled_cmd(0x00); oled_cmd(0x10);
-        for (unsigned x = 0; x < 128; ++x) oled_data(frame[page][x]);
-    }
-}
+const char build_tag[] = "R5";   /* [AI]  extern 声明在 app_car.h */
 
 /* ---- PWM + motor drivers (AT8236, proven mapping) ---- */
 static void gpio_af(GPIO_TypeDef *gpio, unsigned pin, unsigned af)
@@ -450,33 +314,6 @@ static void reset_positions(void)
     taskEXIT_CRITICAL();
 }
 
-/* [AI]  舵机随电机联动的演示序列(非阻塞): 45° -> 135° -> 中位, PC 组 + PB15 */
-static uint32_t servo_demo_at;
-static uint8_t servo_demo_step;
-
-static void servo_demo_kick(uint32_t now)
-{
-    servo_demo_step = 0;
-    servo_demo_at = now;
-    servo_set_us(0, 1000U);
-    servo_set_us(2, 1000U);
-}
-
-static void servo_demo_step_fn(uint32_t now)
-{
-    if (servo_demo_step >= 3U) return;
-    if ((int32_t)(now - servo_demo_at) < 0) return;
-    if (servo_demo_step == 0U) {
-        servo_set_us(0, 2000U); servo_set_us(2, 2000U);
-        servo_demo_at = now + 400U; servo_demo_step = 1U;
-    } else if (servo_demo_step == 1U) {
-        servo_set_us(0, 1500U); servo_set_us(2, 1500U);   /* [AI]  中位 */
-        servo_demo_at = now + 400U; servo_demo_step = 2U;
-    } else {
-        servo_demo_step = 3U;   /* [AI]  完成 */
-    }
-}
-
 static void start_run(uint32_t now)
 {
     reset_positions();
@@ -493,7 +330,6 @@ static void start_run(uint32_t now)
     }
     active_motor = 0;
     mode = RUNNING;
-    servo_demo_kick(now);   /* [AI]  舵机跟电机一起动 */
 }
 
 static void start_calibration(uint32_t now)
@@ -652,7 +488,8 @@ static void control_bench(uint32_t now)
 
 void car_control_step(uint32_t now)
 {
-    servo_demo_step_fn(now);   /* [AI]  舵机联动演示序列推进 */
+    motor_vbat_mv = battery_read_mv();          /* [AI]  100Hz 采样(原在显示层) */
+    enable_switch = (int8_t)((GPIOD->IDR >> 3) & 1U);
 
     /* operator inputs: short press = bench run start/stop, long press =
        mecanum motion self-test start/stop */
@@ -808,66 +645,6 @@ void car_control_step(uint32_t now)
     if (mode == RUNNING) control_bench(now);
 }
 
-/* ---- OLED table (proven layout + battery header + diagnostics) ---- */
-static void display_table(void)
-{
-    char row[40];
-    for (unsigned p = 0; p < 8; ++p)
-        for (unsigned x = 0; x < 128; ++x) frame[p][x] = 0;
-
-    motor_vbat_mv = battery_read_mv();
-    enable_switch = (int8_t)((GPIOD->IDR >> 3) & 1U);
-
-    (void)snprintf(row, sizeof(row), "MS TGT POS RPM %lu.%luV",
-                   (unsigned long)(motor_vbat_mv / 1000UL),
-                   (unsigned long)((motor_vbat_mv / 100UL) % 10UL));
-    display_text(0, 0, row);
-    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-        int32_t counts = position_counts[i];
-        if (encoder_sign[i] != 0) counts *= encoder_sign[i];
-        int32_t turns_hundredths = (int32_t)((int64_t)counts * 100L / ENCODER_COUNTS_PER_REV);
-        char sign = turns_hundredths < 0 ? '-' : '+';
-        uint32_t magnitude = (uint32_t)(turns_hundredths < 0 ? -(int64_t)turns_hundredths : turns_hundredths);
-        int32_t rpm = rpm_value[i];
-        if (encoder_sign[i] != 0) rpm *= encoder_sign[i];
-        char phase = motors[i].phase == MOTOR_DONE ? 'D' :
-                     motors[i].phase == MOTOR_BRAKE ? 'B' : 'R';
-        if (mode == IDLE) phase = '-';
-        (void)snprintf(row, sizeof(row), "%c%c %u %c%lu.%02lu %ld",
-                       (char)('A' + i), phase, target_turns[i], sign,
-                       (unsigned long)(magnitude / 100U), (unsigned long)(magnitude % 100U),
-                       (long)rpm);
-        display_text(0, 10U + i * 10U, row);
-    }
-    if (estop_latched != 0U) {
-        display_text(0, 54, "ESTOP");
-    } else if (remote_running != 0U) {
-        display_text(0, 54, "REMOTE");
-    } else if (mt_running != 0U) {
-        static const char *const mt_name[6] = {
-            "MT FWD", "MT BACK", "MT LEFT", "MT RIGHT", "MT CCW", "MT CW"
-        };
-        display_text(0, 54, (mt_index & 1U) ? "MT PAUSE"
-                       : mt_name[mt_index >> 1]);
-    } else switch (mode) {
-    case IDLE:    display_text(0, 54, "READY"); break;
-    case RUNNING: display_text(0, 54, "RUN ALL"); break;
-    case DONE:    display_text(0, 54, "DONE"); break;
-    case STOPPED: display_text(0, 54, "STOP"); break;
-    case FAULT:
-        (void)snprintf(row, sizeof(row), "FAULT %c", (char)('A' + active_motor));
-        display_text(0, 54, row);
-        break;
-    case CALIBRATING: display_text(0, 54, "CALIB 55"); break;
-    case CALIB_DONE:  display_text(0, 54, "CAL DONE"); break;
-    }
-    (void)snprintf(row, sizeof(row), "E%u %c", (unsigned)enable_switch,
-                   (char)reset_cause);
-    display_text(78, 54, row);
-    display_text(102, 54, build_tag);
-    oled_show();
-}
-
 /* ---- 25 kHz control timer (design: PID interrupt every 40 us) ---- */
 static void pid_timer_init(void)
 {
@@ -943,28 +720,21 @@ void car_init(void)
     button_init();
     enable_switch_init();
     battery_adc_init();
-    oled_init();
     watchdog_init();
-    /* [AI]  R3: pid_timer_init() 不再在此调用——25kHz 中断推迟到调度器
-       启动后由 task_control 首拍触发 car_start_control_isr()。R2 取证:
-       tick 恰在本函数后段(TIM6 启动)死亡,推迟后 boot 与实时中断解耦,
-       且即使故障再现,任务仍由 SysTick 驱动可继续运行/喂狗/显示 */
+    /* [AI]  R3: pid_timer_init() 不在此调用——25kHz 中断推迟到调度器启动后
+       由 task_control 首拍触发 car_start_control_isr()。R2 取证:tick 恰在
+       本函数后段(TIM6 启动)死亡,推迟后 boot 与实时中断解耦,即使故障再现,
+       任务仍由 SysTick 驱动可继续运行/喂狗 */
 }
 
+/* [AI]  R3: 25kHz 控制 ISR 的启动点,从 car_init 推迟到调度器运行后。
+   只允许启动一次;Task_Control 首拍调用。 */
 void car_start_control_isr(void)
 {
-    /* [AI]  R3: 25kHz 控制 ISR 的启动点,从 car_init 推迟到调度器运行后。
-       只允许启动一次;Task_Control 首拍调用。 */
     static uint8_t started;
     if (started != 0U) return;
     started = 1U;
     pid_timer_init();
-}
-
-void car_display_step(uint32_t now)
-{
-    (void)now;
-    display_table();
 }
 
 void car_feed_watchdog(void)
@@ -975,14 +745,6 @@ void car_feed_watchdog(void)
 uint32_t car_battery_mv(void) { return motor_vbat_mv; }
 uint8_t car_enable_switch(void) { return (uint8_t)enable_switch; }
 uint8_t car_mode(void) { return (uint8_t)mode; }
-
-int32_t car_position_hundredths(unsigned i)
-{
-    if (i >= MOTOR_COUNT) return 0;
-    int32_t counts = position_counts[i];
-    if (encoder_sign[i] != 0) counts *= encoder_sign[i];
-    return (int32_t)((int64_t)counts * 100L / ENCODER_COUNTS_PER_REV);
-}
 
 /* ---- CAN command inputs (called by Task_CAN_Rx) ---- */
 void car_can_velocity(int32_t vx_mmps, int32_t vy_mmps, int32_t wz_crads,

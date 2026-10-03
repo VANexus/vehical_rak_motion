@@ -171,14 +171,9 @@ static void task_can_tx(void *argument)
 static void task_status(void *argument)
 {
   (void)argument;
-  unsigned div = 0;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-    car_feed_watchdog();
-    if (++div >= 2U) {                              /* 200 ms OLED */
-      div = 0;
-      car_display_step(HAL_GetTick());
-    }
+    car_feed_watchdog();                            /* [AI]  10Hz 喂狗(OLED 已移除,R5) */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(100));     /* 10 Hz */
   }
 }

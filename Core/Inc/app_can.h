@@ -13,16 +13,12 @@
      发  0x200 CHASSIS_VEL_FB  (100Hz, flags=mode/estop/fault)
      发  0x030 XFER_CH_TO_ARM  (1kHz, 互锁)
      发  0x230 NODE_INFO_CHASSIS (上电 1 次 + 1Hz)
-   另含 Type-C 串口本地测试通道（帧格式独立, 见 app_can.c serial 段）
-   与 6 路舵机输出（ch0=PC6-9 组, ch1=PB14, ch2=PB15）。 */
+   另含 Type-C 串口本地测试通道（帧格式独立, 见 app_can.c serial 段）。 */
 
 void can_init(void);                     /* [AI]  硬件 + 队列 + NVIC（先于调度器调用） */
 void can_rx_task_step(void);             /* [AI]  阻塞于队列；Task_CAN_Rx 调用 */
 void can_tx_task_step(uint32_t now_ms);  /* [AI]  1kHz；Task_CAN_Tx 调用 */
 
 void serial_init(void);                  /* [AI]  Type-C 串口遥控（本地测试通道） */
-
-void servo_init(void);                   /* [AI]  6 路舵机：ch0=PC6-9, ch1=PB14, ch2=PB15 */
-void servo_set_us(uint8_t ch, uint16_t pulse_us);   /* 500~2500µs */
 
 #endif /* APP_CAN_H */

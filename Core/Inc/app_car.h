@@ -15,13 +15,11 @@ extern const char build_tag[];   /* [AI]  版本标签，单点定义在 app_car
 void car_init(void);
 void car_start_control_isr(void);      /* [AI]  R3: 25kHz ISR 启动点,Task_Control 首拍调用 */
 void car_control_step(uint32_t now);   /* 100 Hz, Task_Control */
-void car_display_step(uint32_t now);   /* OLED refresh, Task_Status */
 void car_feed_watchdog(void);          /* Task_Status */
 
 uint32_t car_battery_mv(void);
 uint8_t car_enable_switch(void);
 uint8_t car_mode(void);
-int32_t car_position_hundredths(unsigned i);
 
 /* CAN command inputs (Task_CAN_Rx) */
 void car_can_velocity(int32_t vx_mmps, int32_t vy_mmps, int32_t wz_crads,

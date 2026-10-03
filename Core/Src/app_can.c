@@ -1,5 +1,5 @@
 /**
- * [AI]  @file  app_can.c — CAN 协议 v3 + Type-C 串口遥控 + 舵机输出
+ * [AI]  @file  app_can.c — CAN 协议 v3 + Type-C 串口遥控
  *
  * [AI]  协议规范见 docs/PROTOCOL.md（v3）：小端、DLC=8、byte6=counter(高4位)|
  * [AI]  flags(低4位)、byte7=CRC8(poly 0x07, 初值=该帧 Data ID, 覆盖字节0-6)。
@@ -250,8 +250,8 @@ void can_tx_task_step(uint32_t now_ms)
 }
 
 /* [AI]  ---- Type-C 串口（CH9102）：本地测试通道（USART1/USART3 @115200）----
-   帧格式为本地约定（8 字节 + CRC8 初值 0）：速度帧(同 0x100 布局)与
-   舵机帧(byte6=0xA5)。不是总线协议，can_check.py 不校验此通道。 */
+   帧格式为本地约定（8 字节 + CRC8 初值 0）：速度帧(同 0x100 布局)。
+   不是总线协议，can_check.py 不校验此通道。 */
 #define SERIAL_BAUD 115200U
 
 struct serial_rx {
@@ -280,16 +280,12 @@ static void serial_parse(struct serial_rx *s, uint8_t b)
     s->buf[s->len++] = b;
     while (s->len >= 8U) {
         if (crc8_local(s->buf, 7U) == s->buf[7]) {
-            if (s->buf[6] == 0xA5U) {                  /* [AI]  本地舵机帧 */
-                servo_set_us(s->buf[2] & 3U,
-                    (uint16_t)(((uint16_t)s->buf[0] << 8) | s->buf[1]));
-            } else {                                   /* [AI]  本地速度帧(测试) */
-                car_can_velocity(
-                    (int32_t)(int16_t)(((uint16_t)s->buf[0] << 8) | s->buf[1]),
-                    (int32_t)(int16_t)(((uint16_t)s->buf[2] << 8) | s->buf[3]),
-                    (int32_t)(int16_t)(((uint16_t)s->buf[4] << 8) | s->buf[5]),
-                    s->buf[6], HAL_GetTick());
-            }
+            /* [AI]  本地速度帧(同 0x100 布局) */
+            car_can_velocity(
+                (int32_t)(int16_t)(((uint16_t)s->buf[0] << 8) | s->buf[1]),
+                (int32_t)(int16_t)(((uint16_t)s->buf[2] << 8) | s->buf[3]),
+                (int32_t)(int16_t)(((uint16_t)s->buf[4] << 8) | s->buf[5]),
+                s->buf[6], HAL_GetTick());
             for (uint8_t k = 0; k + 8U < s->len; ++k) s->buf[k] = s->buf[k + 8U];
             s->len = (uint8_t)(s->len - 8U);
         } else {
@@ -361,79 +357,5 @@ void serial_poll_tx(void)
             uart->DR = ser_txq[u][ser_tx_rd[u]];
             ser_tx_rd[u] = (uint8_t)((ser_tx_rd[u] + 1U) % sizeof(ser_txq[0]));
         }
-    }
-}
-
-/* [AI]  ---- 舵机输出: 6 路 ----
-   ch0 = PC6/PC7/PC8/PC9 四座同步(GPIO 翻转 + TIM14 时基: 50Hz 更新中断
-   四路同时置高, CCR1 比较中断同时拉低, 脉宽 = CCR1 µs)。该组座供电
-   3V3(原理图 J1/J4)，MG996R 建议插 ch2 的 5V5 座。
-   ch1 = PB14 / ch2 = PB15 (TIM12_CH1/CH2 硬件 PWM, AF9; PB15 = 5V5 座,
-   资源表注明阿克曼转向舵机用 PB15)。绝不用 TIM8: 它是 C/D 电机 PWM。 */
-#define SERVO_MIN_US   500U
-#define SERVO_MAX_US  2500U
-#define SERVO_MID_US  1500U
-#define PC_GROUP_MASK  0x03C0UL
-
-static volatile uint16_t servo_pc_us = SERVO_MID_US;
-
-void servo_set_us(uint8_t ch, uint16_t pulse_us)
-{
-    if (pulse_us < SERVO_MIN_US) pulse_us = SERVO_MIN_US;
-    if (pulse_us > SERVO_MAX_US) pulse_us = SERVO_MAX_US;
-    switch (ch & 3U) {
-    case 0: servo_pc_us = pulse_us; break;   /* [AI]  PC6-9 四座同步 */
-    case 1: TIM12->CCR1 = pulse_us; break;   /* PB14 */
-    default: TIM12->CCR2 = pulse_us; break;  /* PB15 */
-    }
-}
-
-void servo_init(void)
-{
-    RCC->APB1ENR |= RCC_APB1ENR_TIM14EN;
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
-    (void)RCC->APB1ENR;
-    GPIOC->MODER |= (1UL << 12) | (1UL << 14) | (1UL << 16) | (1UL << 18);
-    GPIOC->BSRR = PC_GROUP_MASK << 16;
-    TIM14->CR1 = 0;
-    TIM14->PSC = 83;                   /* 84MHz/84 = 1MHz -> 1µs */
-    TIM14->ARR = 19999U;               /* 20ms = 50Hz */
-    TIM14->CCR1 = servo_pc_us;
-    TIM14->SR = 0;
-    TIM14->DIER = TIM_DIER_UIE | TIM_DIER_CC1IE;
-    TIM14->CR1 = TIM_CR1_CEN;
-    NVIC_SetPriority(TIM8_TRG_COM_TIM14_IRQn, 7U);
-    NVIC_EnableIRQ(TIM8_TRG_COM_TIM14_IRQn);
-
-    RCC->APB1ENR |= RCC_APB1ENR_TIM12EN;
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-    (void)RCC->APB1ENR;
-    GPIOB->MODER = (GPIOB->MODER & ~((3UL << 28) | (3UL << 30))) |
-                   (2UL << 28) | (2UL << 30);
-    GPIOB->AFR[1] = (GPIOB->AFR[1] & 0x00FFFFFFUL) | 0x99000000UL;
-    TIM12->CR1 = 0;
-    TIM12->PSC = 83;
-    TIM12->ARR = 19999U;
-    TIM12->CCMR1 = (6U << 4) | (1U << 3) | (6U << 12) | (1U << 11);
-    TIM12->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E;
-    TIM12->CCR1 = SERVO_MID_US;
-    TIM12->CCR2 = SERVO_MID_US;
-    TIM12->EGR = TIM_EGR_UG;
-    TIM12->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
-    /* [AI]  开机不做阻塞扫描(R2 教训:boot 依赖 HAL tick 会挂死);
-       舵机联动由 USER 键路径的非阻塞 servo_demo 驱动 */
-}
-
-void TIM8_TRG_COM_TIM14_IRQHandler(void)
-{
-    uint32_t sr = TIM14->SR;
-    if ((sr & TIM_SR_UIF) != 0U) {
-        TIM14->SR = (uint32_t)~TIM_SR_UIF;
-        GPIOC->BSRR = PC_GROUP_MASK;
-        TIM14->CCR1 = servo_pc_us;
-    }
-    if ((sr & TIM_SR_CC1IF) != 0U) {
-        TIM14->SR = (uint32_t)~TIM_SR_CC1IF;
-        GPIOC->BSRR = PC_GROUP_MASK << 16;
     }
 }
