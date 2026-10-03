@@ -103,7 +103,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R1";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R2";   /* [AI]  extern 声明在 app_car.h */
 static uint8_t frame[8][128];
 
 /* ---- time base: HAL tick ---- */

@@ -36,24 +36,17 @@ vehical_rak_chassis/
 
 ---
 
-## 1. 当前状态：CubeMX 骨架 + 已打通构建，业务代码 0 行
+## 1. 当前状态：R2 —— 轮子全栈已移植，MX 时钟/时基已切 HSE+TIM7
+
+> 移植与版本细节见交接文档（`../car/README4.md`）。业务代码在 `Core/Src/app_car.c`（电机/编码器/OLED/ADC/IWDG/TIM6 25kHz ISR/舵机/串口）与 `Core/Src/app_can.c`（CAN v3）。
 
 | 项 | 状态 |
 | --- | --- |
-| CubeMX 生成 | ✅ FW_F4 V1.28.3，TargetToolchain=CMake |
-| Debug / Release 构建 | ✅ **两端命令已在 Linux 实测通过**（下表数据来自实测输出） |
-| 上板运行 | ❌ 未做（当前无板子接在这台机器上） |
-| 应用代码 | ❌ 未开始，`Core/Src/` 只有 CubeMX 生成文件 |
-| 外设配置 | ❌ 只开了 FreeRTOS + SWD，**电机/编码器/CAN/OLED/ADC/IWDG 全部未配** |
-
-实测构建结果（CubeCLT 14.3.rel1，`arm-none-eabi-size`）：
-
-| 预设 | text | data | bss | FLASH 占比 | RAM 占比 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Debug | 16 116 | 16 | 43 384 | 16 140 B / 512 KB = 3.08% | 43 400 B / 128 KB = 33.11% |
-| Release | 10 224 | 16 | 43 376 | 10 240 B / 512 KB ≈ 1.95% | 同上 |
-
-> RAM 的 43 KB 主要是启动栈 `0x4000` + newlib heap `0x2000` + FreeRTOS `heap_4` 15 360 B，不是应用占用。
+| CubeMX 生成 | ✅ FW_F4 V1.28.3，TargetToolchain=CMake；R2 重生成通过（时基 TIM7 + HSE 8MHz 时钟树） |
+| Debug / Release 构建 | ✅ 双配置零警告（Windows 实测，Debug FLASH 36.4KB / RAM 45.3KB） |
+| 应用代码 | ✅ R2：25kHz 闭环 + CAN v3 + 舵机 + 串口遥控 + 台架自检（寄存器级，见 `docs` 交接文档 §四 的 LL/寄存器裁决） |
+| 上板运行 | ❌ 未烧录实测（R1/R2 均未上板） |
+| 外设配置 | MX 侧仅 FREERTOS/NVIC/RCC/SYS（时基 TIM7）；**电机/编码器/CAN/OLED/ADC/IWDG 由应用代码寄存器级实现**（不走 MX，防重生成覆盖） |
 
 ---
 
@@ -84,7 +77,8 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 | --- | --- |
 | IP | `FREERTOS`、`NVIC`、`RCC`、`SYS`（仅 4 个，见 `.ioc` 的 `Mcu.IPNb`） |
 | FreeRTOS | CMSIS-OS **v2**，tick 1 kHz，`configTOTAL_HEAP_SIZE=15360`（heap_4），`configMAX_PRIORITIES=56`，只有一个 `defaultTask`（栈 128 字，normal 优先级）→ `Core/Src/freertos.c` |
-| 时钟 | **HSI** + PLL → SYSCLK 168 MHz，APB1 /4（定时器 84 MHz）、APB2 /2（定时器 168 MHz），`FLASH_LATENCY_5` → `main.c` 的 `SystemClock_Config()`。`.ioc` 里把 PH0/PH1 设成了 HSE 振荡器模式，但**时钟树没有用 HSE** |
+| 时钟 | **HSE 8MHz 晶振 + PLL**（8/4×168/2）→ SYSCLK 168 MHz，APB1 /4（定时器 84 MHz）、APB2 /2（定时器 168 MHz），`FLASH_LATENCY_5` → `main.c` 的 `SystemClock_Config()`。R2 起时钟树已用 HSE（AGENTS 硬约束，CAN 上总线前提）；`car_init()` 保留 HSE→168MHz 运行时兜底 |
+| HAL 时基 | **TIM7 @1kHz**（R2 起，`stm32f4xx_hal_timebase_tim.c`），SysTick 归 FreeRTOS；TICK_INT_PRIORITY=15（CubeMX 默认） |
 | 调试 | SWD 已开（PA13/PA14） |
 | HAL 模块 | 仅基集：CORE/RCC/GPIO/DMA/EXTI/PWR/FLASH。`stm32f4xx_hal_conf.h` 里 TIM/CAN/ADC/IWDG/UART **都是注释状态** |
 | newlib 线程安全 | `STM32_THREAD_SAFE_STRATEGY=4` + `newlib_lock_glue.c` + `stm32_lock.h`（CubeMX 生成，勿手删） |
@@ -99,6 +93,8 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 
 ### Phase A：外设（CubeMX 里配，配完重新生成 + 编译）
 
+> **R1/R2 实施路线变更**：电机/编码器/CAN/OLED/ADC/IWDG/舵机/串口已由 `app_car.c`/`app_can.c` **寄存器级实现**（不在 MX 配置，重生成不影响）；MX 侧只配了时基与 RCC。下表保留原 MX 路线方案作参考；**RCC 与 TIM7 两行已完成**。
+
 | 外设 | 目标 | 备注 |
 | --- | --- | --- |
 | TIM1 CH1/2/3/4 | 电机 C(PE9/PE11) D(PE13/PE14) PWM | **25 kHz** → APB2 定时器 168 MHz 下 `ARR = 6719`；AT8236 双输入：`IN1=IN2=1` 刹车、`=0` 滑行 |
@@ -111,8 +107,8 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 | ADC1 | PB0 = IN8 电池电压，100k:10k 分压 | |
 | IWDG | 约 2 s，由状态任务喂 | |
 | USART1 | PA9/PA10（TYPE-C，CH9102F） | 仅调试输出，不参与实时控制（与草案一致，此处草案没错） |
-| TIM7 | HAL 时基（1 kHz）；SysTick 已让给 FreeRTOS | |
-| **RCC** | **HSI → HSE 8 MHz**（PH0/PH1 已有晶振） | **上总线前必改的第一项**；位时序按 42 MHz PCLK1 / BRP=3 / BS1=11 / BS2=2 得到 85.7 % 采样点 |
+| TIM7 | HAL 时基（1 kHz）；SysTick 已让给 FreeRTOS | ✅ **R2 已配**（SYS Timebase=TIM7，`stm32f4xx_hal_timebase_tim.c`） |
+| **RCC** | **HSI → HSE 8 MHz**（PH0/PH1 已有晶振） | ✅ **R2 已配**（HSE+PLL→168MHz；位时序按 42 MHz PCLK1 / BRP=3 / BS1=11 / BS2=2 得到 85.7 % 采样点） |
 
 **PWM / 控制频率 = 25 kHz，这是设计规定**（见 `docs/PROTOCOL.md`（见 docs/PROTOCOL.md 与 AGENTS.md） §5）。但台架期有一条记录写"10 kHz 是唯一验证过能让桥臂出扭矩的频率，25 kHz 试过发不出扭矩"（`../car2/four-motor-sync/main.c:5-8`）。把它当**风险项**，不当改频率的理由：配置完就带载 + 示波器实测；不通过就**停下上报并决策**（驱动能力问题），**不许擅自改成 10 kHz 交差**。
 
@@ -153,4 +149,4 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 - `four-motor-25k/main.c`（car2 台架归档，未纳入本仓）：裸机版电机/编码器/OLED/ADC 寄存器操作参考（**金标准台架代码**，移植时改成 HAL，别直接抄进本工程）。
 - `../car2/tools/references/smart-transport-robot/`：同板完整课设（底盘 `chassis/mecanum.c`、`motor_ctrl.c`、`calib.c`，IMU 打法）。
 
-*最后更新：2026-10-02。改动构建方式或外设结论时请同步本文件。*
+*最后更新：2026-10-03（R2：时基 TIM7 + HSE 时钟树；全栈移植状态见 §1）。改动构建方式或外设结论时请同步本文件。*
