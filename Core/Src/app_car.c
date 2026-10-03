@@ -1,4 +1,5 @@
 #include "app_car.h"
+#include "app_imu.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -43,6 +44,19 @@
    If a wheel runs the wrong way during test, flip its sign(s) here. */
 #define IK_PERMM_NUM  3017L   /* counts per mm, x10 */
 #define IK_PERMM_DEN 10000L
+
+/* [AI]  R9 陀螺仪自稳定调参（A 板 ICM20948；算法见 stabilizer_apply） */
+#define STAB_ENABLE       1
+#define STAB_RATE_KP      1.5f   /* 旋转速率误差(°/s) → 修正(0.01rad/s) */
+#define STAB_DAMP_K       1.2f   /* 无旋转指令时的阻尼增益 */
+#define STAB_HEAD_KP      0.6f   /* 航向保持(每度偏差 → 0.01rad/s) */
+#define STAB_CORR_MAX     120L   /* 修正限幅(0.01rad/s) */
+#define STAB_HOLD_BAND    3L     /* |wz指令| 小于此值视作"无旋转指令" */
+#define SLIP_ERR_DPS      35.0f  /* 轮速推算 vs 陀螺仪 偏航率差阈值 */
+#define SLIP_HOLD_MS      300U
+#define SLIP_SCALE_MIN     160U  /* 平移降额下限(256=不降) */
+#define SLIP_SCALE_STEP    2U
+#define SLIP_RECOVER_STEP  4U
 
 enum { MOTOR_COUNT = 4 };
 enum run_mode { IDLE, RUNNING, DONE, STOPPED, FAULT, CALIBRATING, CALIB_DONE };
@@ -97,7 +111,13 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R8";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R9";   /* [AI]  extern 声明在 app_car.h */
+/* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
+volatile int32_t  dbg_stab_corr;
+volatile uint16_t dbg_stab_scale = 256U;
+volatile uint8_t  dbg_slip;
+static uint16_t stab_scale = 256U;
+static uint16_t stab_slip_ms;
 
 /* ---- PWM + motor drivers (AT8236, proven mapping) ---- */
 static void gpio_af(GPIO_TypeDef *gpio, unsigned pin, unsigned af)
@@ -385,6 +405,7 @@ static uint32_t mt_step_ms;
 static void start_motion_test(uint32_t now)
 {
     reset_positions();
+    imu_zero_yaw();   /* [AI]  R9: 以进入自检时的航向为参考 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) motors[i].phase = MOTOR_DRIVE;
     mt_index = 0;
     mt_step_ms = now;
@@ -498,10 +519,72 @@ static void control_bench(uint32_t now)
     }
 }
 
+/* [AI] ---- 陀螺仪自稳定（R9）：修正 wz + 打滑降额 ----
+   麦轮打滑/被带偏时，车轮"声称"的偏航与陀螺仪实测不符：
+   1) 有旋转指令：按速率误差(指令-实测)加修正；2) 无旋转指令：阻尼+航向保持；
+   3) 打滑判定：轮速推算偏航率 vs 陀螺仪差 > 阈值持续 300ms → 平移分量降额，
+      恢复后逐步放行。仅驱动路径生效；IMU 不在线时纯直通。 */
+static float wrap180(float e)
+{
+    while (e > 180.0f) e -= 360.0f;
+    while (e < -180.0f) e += 360.0f;
+    return e;
+}
+
+static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
+{
+    if (STAB_ENABLE == 0 || !imu_ok()) return;
+
+    const float DPS_PER_WZ = 0.572958f;              /* 0.01 rad/s → °/s */
+    float dps = imu_yaw_rate_dps();
+    float corr;
+
+    if (*wz > -STAB_HOLD_BAND && *wz < STAB_HOLD_BAND) {
+        corr = -STAB_DAMP_K * dps + STAB_HEAD_KP * wrap180(-imu_yaw_deg());
+    } else {
+        corr = STAB_RATE_KP * ((float)(*wz) * DPS_PER_WZ - dps);
+    }
+    if (corr >  (float)STAB_CORR_MAX) corr =  (float)STAB_CORR_MAX;
+    if (corr < -(float)STAB_CORR_MAX) corr = -(float)STAB_CORR_MAX;
+    *wz += (int32_t)corr;
+    dbg_stab_corr = (int32_t)corr;
+
+    {
+        float slip = (float)meas_wz_crads * DPS_PER_WZ - dps;
+        if (slip < 0.0f) slip = -slip;
+        int driving = (*vx != 0 || *vy != 0 || *wz != 0);
+        if (driving && slip > SLIP_ERR_DPS) {
+            if (stab_slip_ms < 0xFFFFU) stab_slip_ms++;
+            if (stab_slip_ms > SLIP_HOLD_MS) {
+                dbg_slip = 1U;
+                if (stab_scale > SLIP_SCALE_MIN) stab_scale -= SLIP_SCALE_STEP;
+            }
+        } else {
+            stab_slip_ms = 0U;
+            dbg_slip = 0U;
+            if (stab_scale < 256U) stab_scale += SLIP_RECOVER_STEP;
+        }
+        if (stab_scale < 256U) {
+            *vx = (*vx * (int32_t)stab_scale) / 256;
+            *vy = (*vy * (int32_t)stab_scale) / 256;
+        }
+        dbg_stab_scale = stab_scale;
+    }
+}
+
 void car_control_step(uint32_t now)
 {
     motor_vbat_mv = battery_read_mv();          /* [AI]  100Hz 采样(原在显示层) */
     enable_switch = (int8_t)((GPIOD->IDR >> 3) & 1U);
+
+    /* [AI]  R9: 陀螺仪 100Hz 更新（含静止零偏重置）；"静止"=四路无目标且实测转速≈0 */
+    {
+        int still = 1;
+        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+            if (v_cmd[i] != 0 || wheel_speed[i] < -5 || wheel_speed[i] > 5) { still = 0; break; }
+        }
+        imu_update(now, still);
+    }
 
     /* operator inputs: short press = bench run start/stop, long press =
        mecanum motion self-test start/stop */
@@ -588,10 +671,12 @@ void car_control_step(uint32_t now)
             }
         } else if (!bench_busy && mode != FAULT) {
             if (link && cmd_enable != 0U) {
+                int32_t vx = cmd_vx_mmps, vy = cmd_vy_mmps, wz = cmd_wz_crads;
+                if (remote_running == 0U) imu_zero_yaw();   /* [AI]  R9: 进入遥控以当前航向为参考 */
+                stabilizer_apply(&vx, &vy, &wz);            /* [AI]  R9: 陀螺仪自稳定 */
                 for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
                     motors[i].phase = MOTOR_DRIVE;
-                    v_cmd[i] = ik_wheel_target(i, cmd_vx_mmps, cmd_vy_mmps,
-                                               cmd_wz_crads);
+                    v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
                 }
                 remote_running = 1;
             } else if (remote_running != 0U) {
@@ -617,11 +702,14 @@ void car_control_step(uint32_t now)
                 mt_step_ms = now;
                 mt_index = (uint8_t)((mt_index + 1U) % MT_SEQ_N);
             }
-            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                motors[i].phase = MOTOR_DRIVE;
-                v_cmd[i] = ik_wheel_target(i, mt_seq[mt_index][0],
-                                           mt_seq[mt_index][1],
-                                           mt_seq[mt_index][2]);
+            {
+                int32_t vx = mt_seq[mt_index][0], vy = mt_seq[mt_index][1];
+                int32_t wz = mt_seq[mt_index][2];
+                stabilizer_apply(&vx, &vy, &wz);            /* [AI]  R9: 陀螺仪自稳定 */
+                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+                    motors[i].phase = MOTOR_DRIVE;
+                    v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
+                }
             }
         }
     }
@@ -704,6 +792,7 @@ void car_init(void)
     button_init();
     enable_switch_init();
     battery_adc_init();
+    imu_init();      /* [AI]  R9: 板载 ICM20948 陀螺仪(未找到时静默降级) */
     watchdog_init();
     /* [AI]  pid_timer_init 不在此调用：25kHz 中断由 Task_Control 首拍触发
        (car_start_control_isr)，boot 与实时中断解耦（见 README4 §三） */

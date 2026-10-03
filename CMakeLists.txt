@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_car.c
     Core/Src/app_can.c
     Core/Src/app_serial.c
+    Core/Src/app_imu.c
 )
 
 # Add include paths
