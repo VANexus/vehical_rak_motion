@@ -214,6 +214,22 @@ void can_tx_task_step(uint32_t now_ms)
 
     (void)now_ms;
     serial_poll_tx();                                    /* 1kHz 续发串口回读 */
+
+    /* [AI]  R6: 发送邮箱死锁自愈。总线错误风暴/bus-off 后 bxCAN 可能把邮箱挂进
+       "忙但不再重试"的僵死态(TERR0 置位、请求已清、TME0 恒 0)：固件若只看 TME0
+       就会永远不再排帧 → 整机 CAN 静默(实测复现)。邮箱忙超 150ms 即强制 ABRQ
+       释放，下一拍自动排入新帧；正常传输 ≤1ms、永不误触发 */
+    {
+        static uint16_t tx_busy_ms;
+        if ((CAN1->TSR & CAN_TSR_TME0) == 0U) {
+            if (++tx_busy_ms > 150U) {
+                CAN1->TSR = CAN_TSR_ABRQ0;
+                tx_busy_ms = 0U;
+            }
+        } else {
+            tx_busy_ms = 0U;
+        }
+    }
     car_get_velocity(&vx, &vy, &wz);
     put_le16(&d[0], vx);
     put_le16(&d[2], vy);
