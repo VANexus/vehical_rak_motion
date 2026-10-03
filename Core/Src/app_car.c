@@ -111,7 +111,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R13";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R14";   /* [AI]  extern 声明在 app_car.h */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -425,6 +425,22 @@ static int32_t ik_wheel_target(unsigned i, int32_t vx, int32_t vy, int32_t wz)
     return cpm;
 }
 
+/* [AI] R14: 台架刹车段两个重复模式提取（行为保持）
+   brake_settle: 车轮未停稳则重刷刹车起点并返回 1（调用方 continue 等下一拍）
+   mark_done:    判定到位,置 DONE 并累计完成数 */
+static int brake_settle(struct motor_state *m, uint32_t now, int32_t speed)
+{
+    if (speed < -10 || speed > 10) { m->brake_started_ms = now; return 1; }
+    return 0;
+}
+
+static void mark_done(struct motor_state *m, unsigned i, unsigned *finished)
+{
+    m->phase = MOTOR_DONE;
+    v_cmd[i] = 0;
+    ++(*finished);
+}
+
 static void control_bench(uint32_t now)
 {
     unsigned finished = 0;
@@ -440,54 +456,31 @@ static void control_bench(uint32_t now)
             int32_t position = raw * encoder_sign[i];
             int32_t error = (int32_t)(target_turns[i] * ENCODER_COUNTS_PER_REV) - position;
             int32_t speed = wheel_speed[i];
-            if (error >= -POSITION_TOLERANCE && error <= POSITION_TOLERANCE) {
-                if (speed < -10 || speed > 10) {
-                    m->brake_started_ms = now;
-                    continue;
-                }
-                m->phase = MOTOR_DONE;
-                v_cmd[i] = 0;
-                ++finished;
-                continue;
-            }
             /* Overshoot past target: never reverse into it.  A small
                excess is accepted as done; only gross overshoot faults. */
             if (error < -POSITION_TOLERANCE) {
                 if (error < -OVERSHOOT_LIMIT) { fail_run(i); return; }
-                if (speed < -10 || speed > 10) {
-                    m->brake_started_ms = now;
-                    continue;
-                }
-                m->phase = MOTOR_DONE;
-                v_cmd[i] = 0;
-                ++finished;
-                continue;
-            }
-            if (speed < -10 || speed > 10) {
-                m->brake_started_ms = now;
+                if (brake_settle(m, now, speed)) continue;
+                mark_done(m, i, &finished);
                 continue;
             }
             /* Small shortfall: with no reverse allowed a correction from
                here could only overshoot, so accept anything inside the
                3.00 +-0.01 band instead. */
             if (error <= SHORT_ACCEPT) {
-                if (speed < -10 || speed > 10) {
-                    m->brake_started_ms = now;
-                    continue;
-                }
-                m->phase = MOTOR_DONE;
-                v_cmd[i] = 0;
-                ++finished;
+                if (brake_settle(m, now, speed)) continue;
+                mark_done(m, i, &finished);
                 continue;
             }
-            if (speed < -10 || speed > 10) {
-                m->brake_started_ms = now;
-                continue;
-            }
+            /* Real shortfall: one more correction stint.  Moving wheels
+               restart the brake wait; the stint must actually move ~300
+               counts before it may brake again (drive path below). */
+            if (brake_settle(m, now, speed)) continue;
             if (++m->corrections > 8U) { fail_run(i); return; }
             m->phase = MOTOR_DRIVE;
-            m->stint_pos = raw * encoder_sign[i];
+            m->stint_pos = position;
             m->last_motion_ms = now;
+            /* fall through: fresh stint takes the drive path below */
         }
         if ((uint32_t)(now - m->last_motion_ms) > STALL_TIMEOUT_MS) {
             fail_run(i); return;
@@ -577,6 +570,16 @@ static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
             *vy = (*vy * (int32_t)stab_scale) / 256;
         }
         dbg_stab_scale = stab_scale;
+    }
+}
+
+/* [AI] R14: 遥控与麦轮自检共用的驱动下发路径（稳定器修正 → IK → 四路目标） */
+static void drive_apply(int32_t vx, int32_t vy, int32_t wz)
+{
+    stabilizer_apply(&vx, &vy, &wz);
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        motors[i].phase = MOTOR_DRIVE;
+        v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
     }
 }
 
@@ -681,11 +684,7 @@ void car_control_step(uint32_t now)
             if (link && cmd_enable != 0U) {
                 int32_t vx = cmd_vx_mmps, vy = cmd_vy_mmps, wz = cmd_wz_crads;
                 if (remote_running == 0U) imu_zero_yaw();   /* [AI]  R9: 进入遥控以当前航向为参考 */
-                stabilizer_apply(&vx, &vy, &wz);            /* [AI]  R9: 陀螺仪自稳定 */
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                    motors[i].phase = MOTOR_DRIVE;
-                    v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
-                }
+                drive_apply(vx, vy, wz);                    /* [AI]  R9: 陀螺仪自稳定 */
                 remote_running = 1;
             } else if (remote_running != 0U) {
                 /* deadman / enable dropped: decelerate, then stop */
@@ -700,7 +699,7 @@ void car_control_step(uint32_t now)
     /* mecanum motion self-test engine */
     if (mt_running != 0U) {
         if (mt_stop_req != 0U) {
-                if (coast_stop()) {
+            if (coast_stop()) {
                 mt_running = 0;
                 mode = STOPPED;
             }
@@ -710,15 +709,7 @@ void car_control_step(uint32_t now)
                 mt_step_ms = now;
                 mt_index = (uint8_t)((mt_index + 1U) % MT_SEQ_N);
             }
-            {
-                int32_t vx = mt_seq[mt_index][0], vy = mt_seq[mt_index][1];
-                int32_t wz = mt_seq[mt_index][2];
-                stabilizer_apply(&vx, &vy, &wz);            /* [AI]  R9: 陀螺仪自稳定 */
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                    motors[i].phase = MOTOR_DRIVE;
-                    v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
-                }
-            }
+            drive_apply(mt_seq[mt_index][0], mt_seq[mt_index][1], mt_seq[mt_index][2]);
         }
     }
 

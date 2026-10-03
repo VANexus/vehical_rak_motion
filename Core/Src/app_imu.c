@@ -104,8 +104,20 @@ static uint8_t icm_i2c_rd(int ack)        /* ack=1: 主机继续 ACK */
     return b;
 }
 
+/* [AI] R14: I2C 总线解锁——EMI 下从机可能把 SDA 拉死,普通重试永远失败;
+   SCL 打钟≤9 次直到 SDA 被释放,再补一个 STOP 让总线回到空闲态 */
+static void icm_bus_recover(void)
+{
+    for (int i = 0; i < 9 && icm_sda_r() == 0; ++i) {
+        icm_scl(0); icm_dly();
+        icm_scl(1); icm_dly();
+    }
+    icm_i2c_stop();
+}
+
 static int icm_write(uint8_t reg, uint8_t val)
 {
+    if (icm_sda_r() == 0) icm_bus_recover();   /* [AI] R14: SDA 被拉死先解锁 */
     icm_i2c_start();
     if (icm_i2c_wr((uint8_t)(imu_addr << 1))) { icm_i2c_stop(); return 1; }
     icm_i2c_wr(reg); icm_i2c_wr(val); icm_i2c_stop();
@@ -115,6 +127,7 @@ static int icm_write(uint8_t reg, uint8_t val)
 static int icm_read_n(uint8_t reg, uint8_t *buf, int n)   /* 0=ok; 电机 EMI 下靠重试 */
 {
     for (int tries = 0; tries < 3; ++tries) {
+        if (icm_sda_r() == 0) icm_bus_recover();           /* [AI] R14: SDA 被拉死先解锁 */
         int nack;
         icm_i2c_start();
         nack  = icm_i2c_wr((uint8_t)(imu_addr << 1));
