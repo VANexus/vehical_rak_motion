@@ -10,7 +10,9 @@
 #include "main.h"
 #include "stm32f4xx.h"
 
-#define SERIAL_BAUD 115200U
+#define SERIAL_BAUD 921600U   /* [AI]  R12: 上位机 USB 串口规格 921600,100Hz
+                                 (USART1 PCLK2=84M: BRR=91,+0.16%; USART3 PCLK1=42M:
+                                 BRR=46,-0.93%,均在 UART 容限内) */
 enum { SERIAL_PORTS = 2 };
 
 struct serial_rx {
