@@ -111,7 +111,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R12";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R13";   /* [AI]  extern 声明在 app_car.h */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -873,6 +873,22 @@ uint8_t car_can_status(void)
     if (mode == FAULT) s |= 0x02U;
     if (estop_latched != 0U) s |= 0x04U;
     return s;
+}
+
+/* [AI]  R13 调试显示数据出口（app_oled 用）：单值对齐读取天然原子，
+       四轮快照允许跨拍混合（显示用途无碍），无需临界区 */
+uint8_t car_reset_cause(void) { return reset_cause; }
+uint8_t car_mt_index(void)    { return mt_index; }
+uint8_t car_active_motor(void){ return (uint8_t)active_motor; }
+uint8_t car_flags(void)       /* bit0=遥控中 bit1=急停锁存 bit2=自检中 */
+{
+    return (uint8_t)((remote_running != 0U ? 1U : 0U) |
+                     (estop_latched != 0U ? 2U : 0U) |
+                     (mt_running != 0U ? 4U : 0U));
+}
+void car_wheel_speeds(int32_t *out)   /* counts/ms,四轮 */
+{
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) out[i] = wheel_speed[i];
 }
 
 /* ---- 25 kHz control ISR: encoder accounting, ramp, PI, PWM ---- */

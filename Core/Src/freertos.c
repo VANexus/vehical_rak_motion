@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_car.h"
 #include "app_can.h"
+#include "app_oled.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -174,6 +175,7 @@ static void task_status(void *argument)
   TickType_t last = xTaskGetTickCount();
   for (;;) {
     car_feed_watchdog();                            /* [AI]  10Hz 喂狗 */
+    oled_show_step(HAL_GetTick());                  /* [AI]  R13: OLED 调试显示(惰性初始化,内部 5Hz 重绘) */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(100));     /* 10 Hz */
   }
 }
