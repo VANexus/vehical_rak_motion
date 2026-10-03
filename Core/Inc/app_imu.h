@@ -3,8 +3,10 @@
 
 #include <stdint.h>
 
-/* [AI]  板载 ICM-20948 陀螺仪（PB10=SCL / PB11=SDA 软 I2C，PB12=INT 不用）。
-   R9 用途：A 板自稳定——只取偏航角速度(°/s)与积分航向(°)，供 100Hz 监督器
+/* [AI]  板载陀螺仪（PB10=SCL / PB11=SDA 软 I2C，PB12=INT 不用）。
+   R11: 团队两块 C30D 的 IMU 型号不同——ICM-20948(0x00=0xEA) 与 MPU6050(0x75=0x68)
+   双芯片自动探测，刷哪块板都能用。未找到芯片时静默降级。
+   用途：底盘自稳定——只取偏航角速度(°/s)与积分航向(°)，供 100Hz 监督器
    做"速率跟踪 + 航向保持 + 打滑降额"（见 app_car.c stabilizer_*）。
    架构约束：协议帧不加 yaw 字段、航向权威源在 Jetson——本驱动只服务本地稳定环。 */
 
@@ -21,7 +23,9 @@ extern volatile float    imu_dbg_yaw_deg;     /* 航向(°) */
 extern volatile float    imu_dbg_rate_dps;    /* 角速度(°/s) */
 extern volatile uint8_t  imu_dbg_state;       /* bit0=芯片在线 bit1=最近一次读失败 */
 extern volatile uint32_t imu_dbg_fail_cnt;    /* 累计读失败(EMI) */
-extern volatile uint8_t  imu_dbg_who;         /* 0x68 处 WHO_AM_I 实读值 */
+extern volatile uint8_t  imu_dbg_chip;        /* 0=无 1=ICM20948 2=MPU6050 */
+extern volatile uint8_t  imu_dbg_who;         /* 0x68 处 0x00 寄存器实读值 */
 extern volatile uint8_t  imu_dbg_lines;       /* 静息电平 (SCL<<1)|SDA */
+extern volatile uint8_t  imu_dbg_who75;       /* 0x68 处 0x75 寄存器实读值 */
 
 #endif /* APP_IMU_H */

@@ -1,9 +1,10 @@
 /**
- * [AI]  @file  app_imu.c — 板载 ICM-20948 陀螺仪驱动（PB10=SCL / PB11=SDA 软 I2C）
+ * [AI]  @file  app_imu.c — 板载陀螺仪驱动（PB10=SCL / PB11=SDA 软 I2C）
  *
- * 硬件事实（同板课设对照原理图/资源 PDF 实测确认）：ICM-20948 挂在 PB10/PB11，
- * PB12=INT1（不用，轮询）；经 1.8V 电平转换 + 10k 外部上拉；地址 0x68/0x69，
- * WHO_AM_I==0xEA。软 I2C 在电机运行时受 EMI 干扰——所有读带 NACK 重试。
+ * R11: 团队两块 C30D 的 IMU 型号不同——A 板实测 MPU6050（0x75=0x68,0x00=0x81），
+ * 另一块是 ICM-20948（0x00=0xEA）。驱动做双芯片自动探测，刷哪块板都能用。
+ * PB12=INT1（不用，轮询）；经 1.8V 电平转换 + 10k 外部上拉；地址 0x68/0x69。
+ * 软 I2C 在电机运行时受 EMI 干扰——所有读带 NACK 重试。
  * 只做陀螺仪 Z 轴：偏航角速度(°/s) + 积分航向(°)，供本地自稳定环使用。
  * 参考：car2/tools/references/smart-transport-robot/01_.../bsp/bsp_c30d.c（已验证套路）
  */
@@ -22,11 +23,26 @@
 #define ICM_GYRO_SMPLRT_DIV  0x00U   /* bank2: ODR = 1125/(1+7) ≈ 140Hz */
 #define ICM_GYRO_CONFIG_1    0x01U   /* bank2 */
 #define ICM_GYRO_CONFIG1_VAL 0x33U   /* DLPF 开 + 量程 ±500dps */
+
+/* [AI]  R11: MPU6050 寄存器（无 bank） */
+#define MPU_WHOAMI_REG   0x75U
+#define MPU_WHOAMI_VAL   0x68U
+#define MPU_PWR_MGMT_1   0x6BU
+#define MPU_PWR_MGMT_2   0x6CU
+#define MPU_SMPLRT_DIV   0x19U   /* 1kHz/(1+7)=125Hz 输出 */
+#define MPU_CONFIG       0x1AU   /* DLPF_CFG=3: 44Hz 带宽 */
+#define MPU_GYRO_CONFIG  0x1BU
+#define MPU_GYRO_ZOUT_H  0x47U
+
 #define ICM_LSB_PER_DPS  65.5f       /* ±500dps 额定 65.5（课设实测 65.2，可调） */
 #define ICM_Z_SIGN       (+1.0f)     /* Z 正方向=逆时针(ccw)；装反改 -1（手转板验证） */
 #define IMU_STILL_LSB    150.0f      /* 静止窗口范围阈值(raw LSB)；一次 ~90° 转弯约 2250 LSB */
 #define IMU_STILL_MS     400U        /* 静止持续该时长后提交新零偏 */
 
+enum { CHIP_NONE = 0, CHIP_ICM = 1, CHIP_MPU = 2 };
+
+static uint8_t  chip;                /* CHIP_xxx */
+static uint8_t  zout_reg;            /* 陀螺 Z 高字节寄存器（按芯片） */
 static uint8_t  imu_addr;            /* 0=未找到 */
 static float    gyro_bias;
 static float    yaw_now;
@@ -40,9 +56,10 @@ volatile float    imu_dbg_yaw_deg;
 volatile float    imu_dbg_rate_dps;
 volatile uint8_t  imu_dbg_state;
 volatile uint32_t imu_dbg_fail_cnt;
+volatile uint8_t  imu_dbg_chip;     /* 诊断: 0=无 1=ICM20948 2=MPU6050 */
 volatile uint8_t  imu_dbg_who;      /* 诊断: 0x68 处 WHO_AM_I 实读值 */
 volatile uint8_t  imu_dbg_lines;    /* 诊断: 静息 (SCL<<1)|SDA, 0b11=两线均被上拉 */
-volatile uint8_t  imu_dbg_who75;    /* 诊断: 0x68 处寄存器 0x75(MPU系 WHO_AM_I 位) */
+volatile uint8_t  imu_dbg_who75;    /* 诊断: 0x68 处寄存器 0x75(MPU系 WHO_AM_I) */
 
 /* [AI]  DWT 毫秒延时（boot 路径禁 HAL tick——R3 教训；本驱动自含, 不与 app_car 耦合） */
 static void icm_delay_ms(uint32_t ms)
@@ -128,29 +145,46 @@ void imu_init(void)
     imu_dbg_lines = (uint8_t)((((GPIOB->IDR >> ICM_SCL_PIN) & 1U) << 1) |
                               ((GPIOB->IDR >> ICM_SDA_PIN) & 1U));   /* 诊断: 静息电平 */
 
-    /* 地址探测（带重试：上电就绪有竞争，单次探测曾误判 0xFF——课设实测教训） */
+    /* [AI]  R11 双芯片探测（带重试：上电就绪有竞争，单次探测曾误判 0xFF——课设实测教训）
+       同地址 0x68/0x69 上先认 ICM20948(0x00=0xEA) 再认 MPU6050(0x75=0x68)。 */
     icm_delay_ms(50);
     imu_addr = 0U;
+    chip = CHIP_NONE;
     for (int t = 0; t < 25; ++t) {
         imu_addr = 0x68U;
         imu_dbg_who = icm_read(ICM_WHO_AM_I);      /* 诊断: ICM 系 WHO_AM_I(0x00) */
-        imu_dbg_who75 = icm_read(0x75U);           /* 诊断: MPU 系 WHO_AM_I(0x75) */
-        if (imu_dbg_who == ICM_WHOAMI_VAL) break;
-        imu_addr = 0x69U; if (icm_read(ICM_WHO_AM_I) == ICM_WHOAMI_VAL) break;
+        imu_dbg_who75 = icm_read(MPU_WHOAMI_REG);  /* 诊断: MPU 系 WHO_AM_I(0x75) */
+        if (imu_dbg_who == ICM_WHOAMI_VAL) { chip = CHIP_ICM; break; }
+        if (imu_dbg_who75 == MPU_WHOAMI_VAL) { chip = CHIP_MPU; break; }
+        imu_addr = 0x69U;
+        if (icm_read(ICM_WHO_AM_I) == ICM_WHOAMI_VAL) { imu_dbg_who = ICM_WHOAMI_VAL; chip = CHIP_ICM; break; }
+        if (icm_read(MPU_WHOAMI_REG) == MPU_WHOAMI_VAL) { imu_dbg_who75 = MPU_WHOAMI_VAL; chip = CHIP_MPU; break; }
         imu_addr = 0U;
         icm_delay_ms(20);
     }
-    if (imu_addr == 0U) { imu_dbg_state = 0U; return; }
+    imu_dbg_chip = chip;
+    if (chip == CHIP_NONE) { imu_dbg_state = 0U; return; }
 
-    icm_bank(0);
-    icm_write(ICM_PWR_MGMT_1, 0x80U); icm_delay_ms(100);  /* DEVICE_RESET */
-    icm_bank(0);
-    icm_write(ICM_PWR_MGMT_1, 0x01U);                     /* 唤醒, 自动时钟源 */
-    icm_write(ICM_PWR_MGMT_2, 0x00U);                     /* 陀螺+加计全开 */
-    icm_bank(2);
-    icm_write(ICM_GYRO_SMPLRT_DIV, 0x07U);
-    icm_write(ICM_GYRO_CONFIG_1, ICM_GYRO_CONFIG1_VAL);
-    icm_bank(0);
+    if (chip == CHIP_ICM) {
+        zout_reg = ICM_GYRO_ZOUT_H;
+        icm_bank(0);
+        icm_write(ICM_PWR_MGMT_1, 0x80U); icm_delay_ms(100);  /* DEVICE_RESET */
+        icm_bank(0);
+        icm_write(ICM_PWR_MGMT_1, 0x01U);                     /* 唤醒, 自动时钟源 */
+        icm_write(ICM_PWR_MGMT_2, 0x00U);                     /* 陀螺+加计全开 */
+        icm_bank(2);
+        icm_write(ICM_GYRO_SMPLRT_DIV, 0x07U);
+        icm_write(ICM_GYRO_CONFIG_1, ICM_GYRO_CONFIG1_VAL);
+        icm_bank(0);
+    } else {
+        zout_reg = MPU_GYRO_ZOUT_H;
+        icm_write(MPU_PWR_MGMT_1, 0x80U); icm_delay_ms(100);  /* DEVICE_RESET */
+        icm_write(MPU_PWR_MGMT_1, 0x01U);                     /* CLKSEL=1: 陀螺 PLL */
+        icm_write(MPU_PWR_MGMT_2, 0x00U);                     /* 陀螺+加计全开 */
+        icm_write(MPU_SMPLRT_DIV, 0x07U);
+        icm_write(MPU_CONFIG, 0x03U);                         /* DLPF 44Hz */
+        icm_write(MPU_GYRO_CONFIG, 0x08U);                    /* ±500dps */
+    }
     icm_delay_ms(50);
 
     /* 启动零偏：只在"读数范围足够平"的窗口上提交（上电抖动/电机起动会被范围检查拒掉） */
@@ -161,7 +195,7 @@ void imu_init(void)
             float mn = 32767.0f, mx = -32768.0f;
             acc = 0.0f;
             for (int i = 0; i < 200; ++i) {
-                (void)icm_read_n(ICM_GYRO_ZOUT_H, b, 2);
+                (void)icm_read_n(zout_reg, b, 2);
                 float z = (float)(int16_t)(((uint16_t)b[0] << 8) | b[1]);
                 if (z < mn) mn = z;
                 if (z > mx) mx = z;
@@ -183,10 +217,10 @@ void imu_init(void)
 
 void imu_update(uint32_t now_ms, int still)
 {
-    if (imu_addr == 0U) return;
+    if (chip == CHIP_NONE) return;
 
     uint8_t b[2];
-    if (icm_read_n(ICM_GYRO_ZOUT_H, b, 2) != 0) {
+    if (icm_read_n(zout_reg, b, 2) != 0) {
         imu_dbg_fail_cnt++;
         imu_dbg_state = (uint8_t)(1U | 2U);      /* 在线但最近读失败 */
         yaw_last_ms = now_ms;                    /* 不积分；时间戳跟上防跳变 */
@@ -233,7 +267,7 @@ void imu_update(uint32_t now_ms, int still)
     imu_dbg_rate_dps = rate_dps_now;
 }
 
-int   imu_ok(void)           { return imu_addr != 0U; }
+int   imu_ok(void)           { return chip != CHIP_NONE; }
 float imu_yaw_deg(void)      { return yaw_now; }
 float imu_yaw_rate_dps(void) { return rate_dps_now; }
 void  imu_zero_yaw(void)     { yaw_now = 0.0f; }
