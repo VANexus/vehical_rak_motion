@@ -191,18 +191,26 @@ void can_rx_task_step(void)
     }
 }
 
-static int can_tx(uint32_t std_id, const uint8_t *d)
+/* [AI]  R7: 发送按邮箱号分派(mb=0/1/2)。原先三帧全挤邮箱0：同一拍先排
+   0x030 再排 0x200/0x230 时邮箱必忙、后一帧每次被跳过——实测 0x200
+   (100Hz 反馈)与 0x230(心跳)从未落过总线。分邮箱后三者同拍并发
+   (1Mbps 下 3 帧共约 330us/ms, 余量充足) */
+static int can_tx(unsigned mb, uint32_t std_id, const uint8_t *d)
 {
-    if ((CAN1->TSR & CAN_TSR_TME0) == 0U) return 0;
-    CAN1->sTxMailBox[0].TIR = (std_id << 21);
-    CAN1->sTxMailBox[0].TDTR = 8U;
-    CAN1->sTxMailBox[0].TDLR = (uint32_t)d[0] | ((uint32_t)d[1] << 8) |
-                               ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
-    CAN1->sTxMailBox[0].TDHR = (uint32_t)d[4] | ((uint32_t)d[5] << 8) |
-                               ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
-    CAN1->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
+    volatile CAN_TxMailBox_TypeDef *m = &CAN1->sTxMailBox[mb];
+    const uint32_t tme = (mb == 0U) ? CAN_TSR_TME0 :
+                         (mb == 1U) ? CAN_TSR_TME1 : CAN_TSR_TME2;
+    if ((CAN1->TSR & tme) == 0U) return 0;
+    m->TIR = (std_id << 21);
+    m->TDTR = 8U;
+    m->TDLR = (uint32_t)d[0] | ((uint32_t)d[1] << 8) |
+              ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
+    m->TDHR = (uint32_t)d[4] | ((uint32_t)d[5] << 8) |
+              ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
+    m->TIR |= CAN_TI0R_TXRQ;
     return 1;
 }
+
 
 /* [AI]  Task_CAN_Tx：1kHz —— 串口回读续发 + 0x030(互锁)每帧 + 0x200(反馈)每 10 帧 */
 void can_tx_task_step(uint32_t now_ms)
@@ -215,19 +223,21 @@ void can_tx_task_step(uint32_t now_ms)
     (void)now_ms;
     serial_poll_tx();                                    /* 1kHz 续发串口回读 */
 
-    /* [AI]  R6: 发送邮箱死锁自愈。总线错误风暴/bus-off 后 bxCAN 可能把邮箱挂进
-       "忙但不再重试"的僵死态(TERR0 置位、请求已清、TME0 恒 0)：固件若只看 TME0
-       就会永远不再排帧 → 整机 CAN 静默(实测复现)。邮箱忙超 150ms 即强制 ABRQ
+    /* [AI]  R6/R7: 发送邮箱死锁自愈。总线错误风暴/bus-off 后 bxCAN 可能把邮箱挂进
+       "忙但不再重试"的僵死态(TERR0 置位、请求已清、TME 恒 0)：固件若只看 TME
+       就永远不再排帧 → CAN 静默(实测复现)。任一邮箱忙超 150ms 即强制 ABRQ
        释放，下一拍自动排入新帧；正常传输 ≤1ms、永不误触发 */
     {
-        static uint16_t tx_busy_ms;
-        if ((CAN1->TSR & CAN_TSR_TME0) == 0U) {
-            if (++tx_busy_ms > 150U) {
-                CAN1->TSR = CAN_TSR_ABRQ0;
-                tx_busy_ms = 0U;
+        static uint16_t tx_busy_ms[3];
+        static const uint32_t tx_tme[3]  = { CAN_TSR_TME0, CAN_TSR_TME1, CAN_TSR_TME2 };
+        static const uint32_t tx_abrq[3] = { CAN_TSR_ABRQ0, CAN_TSR_ABRQ1, CAN_TSR_ABRQ2 };
+        for (unsigned m = 0U; m < 3U; ++m) {
+            if ((CAN1->TSR & tx_tme[m]) != 0U) {
+                tx_busy_ms[m] = 0U;
+            } else if (++tx_busy_ms[m] > 150U) {
+                CAN1->TSR = tx_abrq[m];
+                tx_busy_ms[m] = 0U;
             }
-        } else {
-            tx_busy_ms = 0U;
         }
     }
     car_get_velocity(&vx, &vy, &wz);
@@ -236,7 +246,7 @@ void can_tx_task_step(uint32_t now_ms)
     put_le16(&d[4], wz);
     d[6] = (uint8_t)((xf_cnt++ & 0xFU) << 4);            /* counter, flags=0 */
     d[7] = crc8_id(d, 7U, DID_XFER_CH2ARM);
-    (void)can_tx(CID_XFER_CH2ARM, d);                    /* 0x030 @1kHz */
+    (void)can_tx(0U, CID_XFER_CH2ARM, d);                    /* 0x030 @1kHz */
 
     if (++div >= 10U) {
         div = 0U;
@@ -245,7 +255,7 @@ void can_tx_task_step(uint32_t now_ms)
                                   (st & 0x0CU));          /* fault/estop bit2-3 */
         d[6] = (uint8_t)(((fb_cnt & 0xFU) << 4) | flags);
         d[7] = crc8_id(d, 7U, DID_VEL_FB);
-        (void)can_tx(CID_VEL_FB, d);                     /* 0x200 @100 Hz */
+        (void)can_tx(1U, CID_VEL_FB, d);                     /* 0x200 @100 Hz */
         serial_push_feedback(d);                         /* [AI]  串口同帧回读(双 Type-C) */
 
         if ((st & 0x08U) != 0U) {
@@ -261,7 +271,7 @@ void can_tx_task_step(uint32_t now_ms)
         d[4] = 0U; d[5] = 0U;
         d[6] = (uint8_t)((ni_cnt & 0xFU) << 4);
         d[7] = crc8_id(d, 7U, DID_NODEINFO);
-        (void)can_tx(CID_NODEINFO, d);
+        (void)can_tx(2U, CID_NODEINFO, d);
     }
 }
 
