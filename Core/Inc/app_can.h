@@ -13,12 +13,12 @@
      发  0x200 CHASSIS_VEL_FB  (100Hz, flags=mode/estop/fault)
      发  0x030 XFER_CH_TO_ARM  (1kHz, 互锁)
      发  0x230 NODE_INFO_CHASSIS (上电 1 次 + 1Hz)
-   另含 Type-C 串口本地测试通道（帧格式独立, 见 app_can.c serial 段）。 */
+   发送经 3 个 bxCAN 邮箱分派(0x030/0x200/0x230)；串口本地通道见 app_serial.h。 */
 
 void can_init(void);                     /* [AI]  硬件 + 队列 + NVIC（先于调度器调用） */
 void can_rx_task_step(void);             /* [AI]  阻塞于队列；Task_CAN_Rx 调用 */
 void can_tx_task_step(uint32_t now_ms);  /* [AI]  1kHz；Task_CAN_Tx 调用 */
 
-void serial_init(void);                  /* [AI]  Type-C 串口遥控（本地测试通道） */
+uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init);   /* [AI]  协议 CRC8（串口通道复用） */
 
 #endif /* APP_CAN_H */

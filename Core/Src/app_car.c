@@ -1,19 +1,17 @@
 #include "app_car.h"
-#include "app_can.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <stdint.h>
 
-/* Port of the bench-verified four-motor-25k firmware (C2) on top of the
-   CubeMX HAL skeleton. Control logic is byte-for-byte the proven one;
-   only the time base (HAL tick) and the PWM period (derived from the
-   real timer clock) are adapted. */
+/* [AI]  @file  app_car.c — 底盘应用层：电机/编码器驱动、25kHz 闭环 ISR、
+   100Hz 监督器（台架测试/麦轮自检/遥控安全链/逆运动学）、电池/看门狗。
+   控制逻辑移植自台架验证版 four-motor-25k(C2)，PWM/中断周期按实际定时器
+   时钟推导。板级真源见 docs/BOARD-C30D.md，协议见 docs/PROTOCOL.md。 */
 
 /* Quadrature counts per output-shaft revolution: MG513P30, 512 lines
    *4 quadrature *30:1 = 61440; 61600 is the hand-measured value. */
 #define ENCODER_COUNTS_PER_REV 61600L
-#define SAMPLE_MS 10U
 #define PWM_HZ 25000U
 #define MAX_DUTY_PERCENT 85U
 #define MOTOR_TIMEOUT_MS 90000U
@@ -56,7 +54,6 @@ struct motor_state {
     uint32_t last_motion_ms;
     uint32_t brake_started_ms;
     uint8_t corrections;
-    int32_t last_delta;
     int32_t stint_pos;   /* sign-normalized position at correction start */
 };
 
@@ -74,7 +71,6 @@ static const int8_t ik_sw[MOTOR_COUNT] = {-1,  1, -1,  1};
 static const int8_t forward_dir[MOTOR_COUNT] = {1, -1, -1, 1};
 static TIM_TypeDef *const enc_tim[MOTOR_COUNT] = {TIM2, TIM3, TIM4, TIM5};
 static volatile int32_t position_counts[MOTOR_COUNT];  /* ISR-owned */
-static volatile int32_t rpm_value[MOTOR_COUNT];
 static uint32_t previous_count[MOTOR_COUNT];           /* ISR-owned */
 static volatile int8_t encoder_sign[MOTOR_COUNT];
 static volatile int32_t duty_q[MOTOR_COUNT];           /* 0.01 %, ISR PI state */
@@ -89,7 +85,7 @@ static int32_t v_ramp[MOTOR_COUNT];                    /* ISR slew-limited targe
 static volatile int32_t cmd_vx_mmps, cmd_vy_mmps, cmd_wz_crads;
 static volatile uint8_t cmd_enable;
 static volatile uint8_t estop_latched;
-volatile uint8_t car_estop_fast_req;   /* [AI]  CAN 中断置位, 25kHz ISR 执行急停 */
+static volatile uint8_t car_estop_fast_req;   /* [AI]  CAN 中断置位, 25kHz ISR 执行急停 */
 static volatile uint32_t last_jetson_ms;
 static volatile int32_t meas_vx_mmps, meas_vy_mmps, meas_wz_crads;
 static uint8_t remote_running;
@@ -101,7 +97,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R7";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R8";   /* [AI]  extern 声明在 app_car.h */
 
 /* ---- PWM + motor drivers (AT8236, proven mapping) ---- */
 static void gpio_af(GPIO_TypeDef *gpio, unsigned pin, unsigned af)
@@ -302,7 +298,6 @@ static void reset_positions(void)
         enc_tim[i]->CNT = 0;
         previous_count[i] = 0;
         position_counts[i] = 0;
-        rpm_value[i] = 0;
         encoder_sign[i] = 0;
         duty_q[i] = 0;
         v_ramp[i] = 0;
@@ -314,6 +309,27 @@ static void reset_positions(void)
     taskEXIT_CRITICAL();
 }
 
+/* [AI]  立即停：四路刹车 + 目标清零（台架/遥控/急停多处复用） */
+static void brake_all(void)
+{
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        motors[i].phase = MOTOR_BRAKE;
+        v_cmd[i] = 0;
+    }
+}
+
+/* [AI]  平滑停：目标清零，等转速落稳再刹车；返回 1 = 已停稳 */
+static int coast_stop(void)
+{
+    int moving = 0;
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        v_cmd[i] = 0;
+        if (wheel_speed[i] < -5 || wheel_speed[i] > 5) moving = 1;
+    }
+    if (moving == 0) brake_all();
+    return (moving == 0);
+}
+
 static void start_run(uint32_t now)
 {
     reset_positions();
@@ -323,7 +339,6 @@ static void start_run(uint32_t now)
         motors[i].last_motion_ms = now;
         motors[i].brake_started_ms = 0;
         motors[i].corrections = 0;
-        motors[i].last_delta = 0;
         motors[i].stint_pos = 0;
         duty_q[i] = 0;
         v_cmd[i] = BENCH_CRUISE;
@@ -342,10 +357,7 @@ static void start_calibration(uint32_t now)
 static void fail_run(unsigned i)
 {
     active_motor = i;
-    for (unsigned j = 0; j < MOTOR_COUNT; ++j) {
-        motors[j].phase = MOTOR_BRAKE;
-        v_cmd[j] = 0;
-    }
+    brake_all();
     mode = FAULT;
 }
 
@@ -498,10 +510,7 @@ void car_control_step(uint32_t now)
         if (mt_running != 0U) {
             mt_stop_req = 1U;
         } else if (mode == RUNNING) {
-            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                motors[i].phase = MOTOR_BRAKE;
-                v_cmd[i] = 0;
-            }
+            brake_all();
             mode = STOPPED;
         } else if (mode != CALIBRATING) {
             start_run(now);
@@ -521,10 +530,7 @@ void car_control_step(uint32_t now)
         } else if (command == 1U && mt_running == 0U && mode != RUNNING) {
             start_run(now);
         } else if (command == 2U) {
-            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                motors[i].phase = MOTOR_BRAKE;
-                v_cmd[i] = 0;
-            }
+            brake_all();
             mode = STOPPED;
         } else if (command == 3U && mt_running == 0U && mode != RUNNING) {
             start_calibration(now);
@@ -541,7 +547,7 @@ void car_control_step(uint32_t now)
         }
     }
 
-    /* measured body velocity (forward kinematics) + display RPM */
+    /* forward kinematics: measured body velocity for 0x200 telemetry */
     {
         int32_t w0 = wheel_speed[0], w1 = wheel_speed[1];
         int32_t w2 = wheel_speed[2], w3 = wheel_speed[3];
@@ -552,8 +558,6 @@ void car_control_step(uint32_t now)
         meas_vy_mmps = (int32_t)((int64_t)vy_c * 10000L / IK_PERMM_NUM);
         meas_wz_crads = (int32_t)((int64_t)wz_c * 1000000L /
                                   (IK_PERMM_NUM * ik_lw));
-        for (unsigned i = 0; i < MOTOR_COUNT; ++i)
-            rpm_value[i] = (int32_t)((int64_t)wheel_speed[i] * 974L / 1000L);
     }
 
     /* 5 s open-loop calibration, driven by the ISR */
@@ -573,18 +577,12 @@ void car_control_step(uint32_t now)
                           mt_running != 0U);
         if (estop_latched != 0U) {
             if (remote_running != 0U) {
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                    motors[i].phase = MOTOR_BRAKE;
-                    v_cmd[i] = 0;
-                }
+                brake_all();
                 remote_running = 0;
                 mode = STOPPED;
             }
             if (mt_running != 0U) {
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                    motors[i].phase = MOTOR_BRAKE;
-                    v_cmd[i] = 0;
-                }
+                brake_all();
                 mt_running = 0;
                 mode = STOPPED;
             }
@@ -598,14 +596,7 @@ void car_control_step(uint32_t now)
                 remote_running = 1;
             } else if (remote_running != 0U) {
                 /* deadman / enable dropped: decelerate, then stop */
-                int moving = 0;
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                    v_cmd[i] = 0;
-                    if (wheel_speed[i] < -5 || wheel_speed[i] > 5) moving = 1;
-                }
-                if (moving == 0) {
-                    for (unsigned i = 0; i < MOTOR_COUNT; ++i)
-                        motors[i].phase = MOTOR_BRAKE;
+                if (coast_stop()) {
                     remote_running = 0;
                     mode = STOPPED;
                 }
@@ -616,14 +607,7 @@ void car_control_step(uint32_t now)
     /* mecanum motion self-test engine */
     if (mt_running != 0U) {
         if (mt_stop_req != 0U) {
-            int moving = 0;
-            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                v_cmd[i] = 0;
-                if (wheel_speed[i] < -5 || wheel_speed[i] > 5) moving = 1;
-            }
-            if (moving == 0) {
-                for (unsigned i = 0; i < MOTOR_COUNT; ++i)
-                    motors[i].phase = MOTOR_BRAKE;
+                if (coast_stop()) {
                 mt_running = 0;
                 mode = STOPPED;
             }
@@ -721,14 +705,11 @@ void car_init(void)
     enable_switch_init();
     battery_adc_init();
     watchdog_init();
-    /* [AI]  R3: pid_timer_init() 不在此调用——25kHz 中断推迟到调度器启动后
-       由 task_control 首拍触发 car_start_control_isr()。R2 取证:tick 恰在
-       本函数后段(TIM6 启动)死亡,推迟后 boot 与实时中断解耦,即使故障再现,
-       任务仍由 SysTick 驱动可继续运行/喂狗 */
+    /* [AI]  pid_timer_init 不在此调用：25kHz 中断由 Task_Control 首拍触发
+       (car_start_control_isr)，boot 与实时中断解耦（见 README4 §三） */
 }
 
-/* [AI]  R3: 25kHz 控制 ISR 的启动点,从 car_init 推迟到调度器运行后。
-   只允许启动一次;Task_Control 首拍调用。 */
+/* [AI]  25kHz 控制 ISR 启动点（调度器运行后、仅一次） */
 void car_start_control_isr(void)
 {
     static uint8_t started;
@@ -764,10 +745,7 @@ void car_can_control(uint8_t cmd, uint32_t now)
     switch (cmd & 0x0FU) {
     case 1U: break;                            /* [AI]  START: 使能位允许即动 */
     case 2U:
-        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-            motors[i].phase = MOTOR_BRAKE;
-            v_cmd[i] = 0;
-        }
+        brake_all();
         mode = STOPPED;
         break;
     case 4U: estop_latched = 1U; break;
@@ -810,10 +788,7 @@ void TIM6_DAC_IRQHandler(void)
     if (car_estop_fast_req != 0U) {
         car_estop_fast_req = 0U;
         estop_latched = 1U;
-        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-            motors[i].phase = MOTOR_BRAKE;
-            v_cmd[i] = 0;
-        }
+        brake_all();
     }
 
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {

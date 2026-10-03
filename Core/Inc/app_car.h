@@ -8,7 +8,7 @@
      the speed PI; all four motors chase the same target speed.
    - 100 Hz supervisor (Task_Control): bench run test, Jetson velocity
      commands (mecanum inverse kinematics), deadman, estop, telemetry.
-   - OLED diagnostics refreshed by Task_Status. */
+   - Task_Status feeds the watchdog; telemetry goes out over CAN (0x200). */
 
 extern const char build_tag[];   /* [AI]  版本标签，单点定义在 app_car.c */
 

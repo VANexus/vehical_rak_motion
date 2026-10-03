@@ -1,14 +1,14 @@
 /**
- * [AI]  @file  app_can.c — CAN 协议 v3 + Type-C 串口遥控
+ * [AI]  @file  app_can.c — CAN 协议 v3（编解码/收发任务/邮箱分派）
  *
  * [AI]  协议规范见 docs/PROTOCOL.md（v3）：小端、DLC=8、byte6=counter(高4位)|
  * [AI]  flags(低4位)、byte7=CRC8(poly 0x07, 初值=该帧 Data ID, 覆盖字节0-6)。
  * [AI]  本文件实现：0x100 VEL_CMD(收) / 0x010 SAFETY(收, 急停走中断快速路径) /
  * [AI]  0x200 VEL_FB(发 100Hz) / 0x030 XFER(发 1kHz) / 0x230 NODE_INFO(发 1Hz)。
- * [AI]  串口(Type-C CH9102)为本地测试通道，帧格式独立(见 serial 段)。
  */
 #include "app_can.h"
 #include "app_car.h"
+#include "app_serial.h"
 #include "main.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
@@ -51,11 +51,7 @@ static int16_t arm_fault_code;        /* [AI]  0x031: 机械臂故障码（暂�
 static int16_t arm_j4_pos, arm_base_pos;
 static uint8_t last_cmd_cnt;          /* [AI]  0x100 计数器校验（低4位） */
 
-/* [AI]  串口回读链路(can_tx_task_step 调用,定义在文件后段) */
-void serial_push_feedback(const uint8_t *d);
-void serial_poll_tx(void);
-
-static uint8_t crc8_id(const uint8_t *p, uint8_t n, uint8_t init)
+uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init)
 {
     uint8_t crc = init;
     while (n--) {
@@ -146,7 +142,7 @@ void CAN1_RX0_IRQHandler(void)
         CAN1->RF0R |= CAN_RF0R_RFOM0;
         /* [AI]  急停快速路径：不进队列，置标志由 25kHz ISR 立即执行(≤40µs) */
         if (f.id == CID_SAFETY &&
-            crc8_id(f.data, 7U, DID_SAFETY) == f.data[7] &&
+            crc8(f.data, 7U, DID_SAFETY) == f.data[7] &&
             (f.data[0] & 0x0FU) == 0x4U) {
             car_estop_request_fast();
         } else {
@@ -170,7 +166,7 @@ void can_rx_task_step(void)
     case CID_XFER_ARM2CH:  did = DID_XFER_ARM2CH; break;
     default: return;
     }
-    if (crc8_id(f.data, 7U, did) != f.data[7]) return;   /* 1. CRC */
+    if (crc8(f.data, 7U, did) != f.data[7]) return;   /* 1. CRC */
 
     if (f.id == CID_VEL_CMD) {
         /* [AI]  2. counter 校验: 高4位, 期望+1; +0=重复帧丢弃 */
@@ -191,10 +187,8 @@ void can_rx_task_step(void)
     }
 }
 
-/* [AI]  R7: 发送按邮箱号分派(mb=0/1/2)。原先三帧全挤邮箱0：同一拍先排
-   0x030 再排 0x200/0x230 时邮箱必忙、后一帧每次被跳过——实测 0x200
-   (100Hz 反馈)与 0x230(心跳)从未落过总线。分邮箱后三者同拍并发
-   (1Mbps 下 3 帧共约 330us/ms, 余量充足) */
+/* [AI]  mb=0/1/2 分派三个发送邮箱：同拍连发若共用邮箱，后一帧必被 TME
+   忙跳过（曾致 0x200/0x230 从未上线，见 README4 §二C） */
 static int can_tx(unsigned mb, uint32_t std_id, const uint8_t *d)
 {
     volatile CAN_TxMailBox_TypeDef *m = &CAN1->sTxMailBox[mb];
@@ -211,22 +205,20 @@ static int can_tx(unsigned mb, uint32_t std_id, const uint8_t *d)
     return 1;
 }
 
-
 /* [AI]  Task_CAN_Tx：1kHz —— 串口回读续发 + 0x030(互锁)每帧 + 0x200(反馈)每 10 帧 */
 void can_tx_task_step(uint32_t now_ms)
 {
     static unsigned div;
-    static uint8_t fb_cnt, xf_cnt, ni_cnt;
+    static uint8_t fb_cnt, xf_cnt, ni_cnt, ni_seq;
     int32_t vx, vy, wz;
     uint8_t d[8];
 
     (void)now_ms;
     serial_poll_tx();                                    /* 1kHz 续发串口回读 */
 
-    /* [AI]  R6/R7: 发送邮箱死锁自愈。总线错误风暴/bus-off 后 bxCAN 可能把邮箱挂进
-       "忙但不再重试"的僵死态(TERR0 置位、请求已清、TME 恒 0)：固件若只看 TME
-       就永远不再排帧 → CAN 静默(实测复现)。任一邮箱忙超 150ms 即强制 ABRQ
-       释放，下一拍自动排入新帧；正常传输 ≤1ms、永不误触发 */
+    /* [AI]  邮箱死锁自愈：错误风暴后 bxCAN 可把邮箱挂在"忙但不再重试"态，
+       固件只查 TME 会永远不再排帧→整机静默；任一邮箱忙超 150ms 强制
+       ABRQ 释放重排（正常 ≤1ms 永不误触发，见 README4 §二C） */
     {
         static uint16_t tx_busy_ms[3];
         static const uint32_t tx_tme[3]  = { CAN_TSR_TME0, CAN_TSR_TME1, CAN_TSR_TME2 };
@@ -245,7 +237,7 @@ void can_tx_task_step(uint32_t now_ms)
     put_le16(&d[2], vy);
     put_le16(&d[4], wz);
     d[6] = (uint8_t)((xf_cnt++ & 0xFU) << 4);            /* counter, flags=0 */
-    d[7] = crc8_id(d, 7U, DID_XFER_CH2ARM);
+    d[7] = crc8(d, 7U, DID_XFER_CH2ARM);
     (void)can_tx(0U, CID_XFER_CH2ARM, d);                    /* 0x030 @1kHz */
 
     if (++div >= 10U) {
@@ -253,8 +245,8 @@ void can_tx_task_step(uint32_t now_ms)
         uint8_t st = car_can_status();
         uint8_t flags = (uint8_t)((st & 0x03U) |          /* mode bit0-1 */
                                   (st & 0x0CU));          /* fault/estop bit2-3 */
-        d[6] = (uint8_t)(((fb_cnt & 0xFU) << 4) | flags);
-        d[7] = crc8_id(d, 7U, DID_VEL_FB);
+        d[6] = (uint8_t)(((fb_cnt++ & 0xFU) << 4) | flags);
+        d[7] = crc8(d, 7U, DID_VEL_FB);
         (void)can_tx(1U, CID_VEL_FB, d);                     /* 0x200 @100 Hz */
         serial_push_feedback(d);                         /* [AI]  串口同帧回读(双 Type-C) */
 
@@ -269,119 +261,8 @@ void can_tx_task_step(uint32_t now_ms)
         uint16_t bh = build_hash16();
         d[2] = (uint8_t)(bh >> 8); d[3] = (uint8_t)bh;
         d[4] = 0U; d[5] = 0U;
-        d[6] = (uint8_t)((ni_cnt & 0xFU) << 4);
-        d[7] = crc8_id(d, 7U, DID_NODEINFO);
+        d[6] = (uint8_t)((ni_seq++ & 0xFU) << 4);
+        d[7] = crc8(d, 7U, DID_NODEINFO);
         (void)can_tx(2U, CID_NODEINFO, d);
-    }
-}
-
-/* [AI]  ---- Type-C 串口（CH9102）：本地测试通道（USART1/USART3 @115200）----
-   帧格式为本地约定（8 字节 + CRC8 初值 0）：速度帧(同 0x100 布局)。
-   不是总线协议，can_check.py 不校验此通道。 */
-#define SERIAL_BAUD 115200U
-
-struct serial_rx {
-    uint8_t buf[16];
-    uint8_t len;
-};
-
-static struct serial_rx ser_rx[2];
-static uint8_t ser_txq[2][32];
-static volatile uint8_t ser_tx_rd[2], ser_tx_wr[2];
-
-static uint8_t crc8_local(const uint8_t *p, unsigned n)
-{
-    uint8_t c = 0U;
-    for (unsigned i = 0; i < n; ++i) {
-        c ^= p[i];
-        for (unsigned b = 0U; b < 8U; ++b)
-            c = (c & 0x80U) ? (uint8_t)((c << 1) ^ 0x07U) : (uint8_t)(c << 1);
-    }
-    return c;
-}
-
-static void serial_parse(struct serial_rx *s, uint8_t b)
-{
-    if (s->len >= sizeof(s->buf)) return;
-    s->buf[s->len++] = b;
-    while (s->len >= 8U) {
-        if (crc8_local(s->buf, 7U) == s->buf[7]) {
-            /* [AI]  本地速度帧(同 0x100 布局) */
-            car_can_velocity(
-                (int32_t)(int16_t)(((uint16_t)s->buf[0] << 8) | s->buf[1]),
-                (int32_t)(int16_t)(((uint16_t)s->buf[2] << 8) | s->buf[3]),
-                (int32_t)(int16_t)(((uint16_t)s->buf[4] << 8) | s->buf[5]),
-                s->buf[6], HAL_GetTick());
-            for (uint8_t k = 0; k + 8U < s->len; ++k) s->buf[k] = s->buf[k + 8U];
-            s->len = (uint8_t)(s->len - 8U);
-        } else {
-            for (uint8_t k = 0; k + 1U < s->len; ++k) s->buf[k] = s->buf[k + 1U];
-            s->len--;
-        }
-    }
-}
-
-void serial_init(void)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN;
-    GPIOA->MODER = (GPIOA->MODER & ~((3UL << 18) | (3UL << 20))) |
-                   (2UL << 18) | (2UL << 20);
-    GPIOA->AFR[1] = (GPIOA->AFR[1] & ~0x00000FF0UL) | 0x00000770UL;
-    GPIOA->PUPDR = (GPIOA->PUPDR & ~(3UL << 20)) | (1UL << 20);
-    GPIOD->MODER = (GPIOD->MODER & ~((3UL << 16) | (3UL << 18))) |
-                   (2UL << 16) | (2UL << 18);
-    GPIOD->AFR[1] = (GPIOD->AFR[1] & ~0x000000FFUL) | 0x00000077UL;
-    GPIOD->PUPDR = (GPIOD->PUPDR & ~(3UL << 18)) | (1UL << 18);
-
-    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-    RCC->APB1ENR |= RCC_APB1ENR_USART3EN;
-    USART1->BRR = (HAL_RCC_GetPCLK2Freq() + SERIAL_BAUD / 2U) / SERIAL_BAUD;
-    USART3->BRR = (HAL_RCC_GetPCLK1Freq() + SERIAL_BAUD / 2U) / SERIAL_BAUD;
-    USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
-    USART3->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
-    NVIC_SetPriority(USART1_IRQn, 7U);
-    NVIC_SetPriority(USART3_IRQn, 7U);
-    NVIC_EnableIRQ(USART1_IRQn);
-    NVIC_EnableIRQ(USART3_IRQn);
-}
-
-void USART1_IRQHandler(void)
-{
-    uint32_t sr = USART1->SR;
-    if ((sr & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
-        uint8_t b = (uint8_t)USART1->DR;
-        if ((sr & USART_SR_RXNE) != 0U) serial_parse(&ser_rx[0], b);
-    }
-}
-
-void USART3_IRQHandler(void)
-{
-    uint32_t sr = USART3->SR;
-    if ((sr & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
-        uint8_t b = (uint8_t)USART3->DR;
-        if ((sr & USART_SR_RXNE) != 0U) serial_parse(&ser_rx[1], b);
-    }
-}
-
-void serial_push_feedback(const uint8_t *d)
-{
-    for (unsigned u = 0; u < 2U; ++u) {
-        for (unsigned i = 0; i < 8U; ++i) {
-            uint8_t next = (uint8_t)((ser_tx_wr[u] + 1U) % sizeof(ser_txq[0]));
-            if (next == ser_tx_rd[u]) break;
-            ser_txq[u][ser_tx_wr[u]] = d[i];
-            ser_tx_wr[u] = next;
-        }
-    }
-}
-
-void serial_poll_tx(void)
-{
-    for (unsigned u = 0; u < 2U; ++u) {
-        USART_TypeDef *uart = (u == 0U) ? USART1 : USART3;
-        if ((uart->SR & USART_SR_TXE) != 0U && ser_tx_rd[u] != ser_tx_wr[u]) {
-            uart->DR = ser_txq[u][ser_tx_rd[u]];
-            ser_tx_rd[u] = (uint8_t)((ser_tx_rd[u] + 1U) % sizeof(ser_txq[0]));
-        }
     }
 }

@@ -110,7 +110,7 @@ void MX_FREERTOS_Init(void) {
   osThreadNew(task_control, NULL, &ctrl_attr);   /* [AI]  100Hz 监督器 */
   osThreadNew(task_can_rx, NULL, &canrx_attr);   /* [AI]  CAN 接收解析 */
   osThreadNew(task_can_tx, NULL, &cantx_attr);   /* [AI]  1kHz 发送 */
-  osThreadNew(task_status, NULL, &stat_attr);    /* [AI]  10Hz 喂狗+OLED */
+  osThreadNew(task_status, NULL, &stat_attr);    /* [AI]  10Hz 喂狗 */
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -173,7 +173,7 @@ static void task_status(void *argument)
   (void)argument;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-    car_feed_watchdog();                            /* [AI]  10Hz 喂狗(OLED 已移除,R5) */
+    car_feed_watchdog();                            /* [AI]  10Hz 喂狗 */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(100));     /* 10 Hz */
   }
 }

@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_car.h"
 #include "app_can.h"
+#include "app_serial.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
