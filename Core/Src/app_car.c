@@ -111,7 +111,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R9";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R10";   /* [AI]  extern 声明在 app_car.h */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -533,6 +533,11 @@ static float wrap180(float e)
 
 static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
 {
+    /* [AI]  R10: 旋转指令的结束沿重新取航向基准。若沿用进入模式时的基准，
+       故意旋转后一松手车会被拉回原方向（自检停顿段可见回甩）；松手取
+       基准后航向保持只防"被带偏"，不再对抗已完成的旋转。 */
+    static uint8_t rot_cmd_prev;
+
     if (STAB_ENABLE == 0 || !imu_ok()) return;
 
     const float DPS_PER_WZ = 0.572958f;              /* 0.01 rad/s → °/s */
@@ -540,8 +545,11 @@ static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
     float corr;
 
     if (*wz > -STAB_HOLD_BAND && *wz < STAB_HOLD_BAND) {
+        if (rot_cmd_prev != 0U) imu_zero_yaw();
+        rot_cmd_prev = 0U;
         corr = -STAB_DAMP_K * dps + STAB_HEAD_KP * wrap180(-imu_yaw_deg());
     } else {
+        rot_cmd_prev = 1U;
         corr = STAB_RATE_KP * ((float)(*wz) * DPS_PER_WZ - dps);
     }
     if (corr >  (float)STAB_CORR_MAX) corr =  (float)STAB_CORR_MAX;
