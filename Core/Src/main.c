@@ -26,6 +26,7 @@
 #include "app_car.h"
 #include "app_can.h"
 #include "app_serial.h"
+#include "app_servo.h"   /* [AI] 6 路舵机驱动 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,6 +95,7 @@ int main(void)
   car_init();      /* [AI]  时钟兜底(HSE→168MHz) + 电机/编码器/ADC/看门狗 */
   can_init();      /* [AI]  CAN 1Mbps + 接收队列 */
   serial_init();   /* [AI]  Type-C 串口遥控 */
+  servo_init();    /* [AI]  6 路舵机 TIM8(PC6-9) + TIM12(PB14/15) @50Hz */
   /* USER CODE END 2 */
 
   /* Init scheduler */

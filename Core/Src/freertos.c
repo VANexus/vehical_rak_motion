@@ -28,6 +28,7 @@
 #include "app_car.h"
 #include "app_can.h"
 #include "app_oled.h"
+#include "app_servo.h"   /* [AI] 舵机自检 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -130,10 +131,14 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Infinite loop */
+  /* [AI] 舵机自检：只扫 ch0 = PC6（约 3 秒一轮，循环）
+     用途：确认底盘固件 + 舵机代码合并后能正常工作。
+     ⚠️ 只在舵机没装到机械臂上时用；装好后要换成正经控制程序。
+     ⚠️ 故意只扫 ch0——ch5=PB15 是板上阿克曼转向舵机口，全扫会误伤。 */
   for(;;)
   {
-    osDelay(1);
+    servo_sweep_test(0);
+    osDelay(500);
   }
   /* USER CODE END StartDefaultTask */
 }
