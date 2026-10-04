@@ -47,7 +47,9 @@ struct can_frame {
 };
 
 static QueueHandle_t rx_queue;
-static int16_t arm_fault_code;        /* [AI]  0x031: 机械臂故障码（暂存） */
+static int16_t arm_fault_code;
+static uint32_t arm_last_ms;
+static uint8_t arm_seen;        /* [AI]  0x031: 机械臂故障码（暂存） */
 static int16_t arm_j4_pos, arm_base_pos;
 static uint8_t last_cmd_cnt;          /* [AI]  0x100 计数器校验（低4位） */
 
@@ -181,6 +183,8 @@ void can_rx_task_step(void)
         uint16_t cmd = (uint16_t)f.data[0] | ((uint16_t)f.data[1] << 8);
         car_can_control((uint8_t)(cmd & 0xFFU), now);    /* START/STOP/ESTOP/… */
     } else if (f.id == CID_XFER_ARM2CH) {
+        arm_seen = 1U;                   /* [AI]  R16: 对端在线证据(UART v1 fault bit2/3) */
+        arm_last_ms = now;
         arm_fault_code = (int16_t)get_le16(&f.data[0]);
         arm_j4_pos     = (int16_t)get_le16(&f.data[2]);
         arm_base_pos   = (int16_t)get_le16(&f.data[4]);
@@ -213,8 +217,8 @@ void can_tx_task_step(uint32_t now_ms)
     int32_t vx, vy, wz;
     uint8_t d[8];
 
-    (void)now_ms;
-    serial_poll_tx();                                    /* 1kHz 续发串口回读 */
+    serial_poll_tx();                                    /* 1kHz 泵串口 TX */
+    serial_v1_tick(now_ms);          /* [AI]  R16: UART v1 lease 看门狗 + BASE_STATE 节拍 */
 
     /* [AI]  邮箱死锁自愈：错误风暴后 bxCAN 可把邮箱挂在"忙但不再重试"态，
        固件只查 TME 会永远不再排帧→整机静默；任一邮箱忙超 150ms 强制
@@ -248,7 +252,6 @@ void can_tx_task_step(uint32_t now_ms)
         d[6] = (uint8_t)(((fb_cnt++ & 0xFU) << 4) | flags);
         d[7] = crc8(d, 7U, DID_VEL_FB);
         (void)can_tx(1U, CID_VEL_FB, d);                     /* 0x200 @100 Hz */
-        serial_push_feedback(d);                         /* [AI]  串口同帧回读(双 Type-C) */
 
         if ((st & 0x08U) != 0U) {
             /* [AI]  TODO: EMCY 0x020 事件帧首发+重发 3 次（§3），暂随 DIAG 上报 */
@@ -267,3 +270,8 @@ void can_tx_task_step(uint32_t now_ms)
         serial_push_text(SERIAL_BANNER);   /* [AI]  R15: 串口识别横幅 @1Hz */
     }
 }
+
+/* [AI]  R16: UART v1 故障位数据出口(对端=0x031 机械臂) */
+uint8_t can_arm_seen(void)       { return arm_seen; }
+uint32_t can_arm_last_ms(void)   { return arm_last_ms; }
+int16_t can_arm_fault_code(void) { return arm_fault_code; }

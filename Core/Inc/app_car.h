@@ -37,6 +37,7 @@ uint8_t car_mt_index(void);      /* 自检序列当前步 */
 uint8_t car_active_motor(void);  /* FAULT 时的电机号 */
 uint8_t car_flags(void);         /* bit0=遥控中 bit1=急停锁存 bit2=自检中 */
 void car_wheel_speeds(int32_t *out);  /* counts/ms,四轮快照 */
+uint8_t car_control_ready(void);      /* [AI]  R16: 1=25kHz 已启动(BOOTING 结束) */
 
 /* [AI]  R13 自稳定诊断量（定义在 app_car.c,SWD/OLED 直读） */
 extern volatile int32_t  dbg_stab_corr;    /* 航向/速率修正(0.01rad/s,已限幅) */

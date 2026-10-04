@@ -111,7 +111,7 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R15";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R16";   /* [AI]  extern 声明在 app_car.h */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -798,12 +798,18 @@ void car_init(void)
 }
 
 /* [AI]  25kHz 控制 ISR 启动点（调度器运行后、仅一次） */
+static uint8_t control_isr_started;   /* [AI]  R16: BOOTING 状态判定用 */
+
 void car_start_control_isr(void)
 {
-    static uint8_t started;
-    if (started != 0U) return;
-    started = 1U;
+    if (control_isr_started != 0U) return;
+    control_isr_started = 1U;
     pid_timer_init();
+}
+
+uint8_t car_control_ready(void)       /* [AI]  R16: 0=还在 BOOTING(25kHz 未启动) */
+{
+    return control_isr_started;
 }
 
 void car_feed_watchdog(void)
