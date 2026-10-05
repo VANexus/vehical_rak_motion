@@ -43,3 +43,26 @@
   （CRC16 0x29B1 校验值 + HELLO golden vector 逐字节一致 + 编解码回环）。
   固件↔host 联调待 A 板 USB 枚举恢复后进行。
 - Stage2-5：待 USB 链路恢复后按对齐包 §7 顺序推进。
+
+---
+
+## 实测补充（2026-10-05 深夜，R17/R18 实车数据）
+
+### 链路质量实测
+- 实测 RX 带宽 **91514 B/s = 理论 99.3%**（921600 8N1），控制+遥测仅占 6.5%，余量 15 倍
+- 端到端：握手/HELLO_ACK/BASE_STATE 全通，echo 100Hz 零丢帧（工具 `tools/uart_v1_test.py`，golden vector 自检过）
+
+### ⚠️ 需要团队签字的偏离：lease 200ms
+- **现象**：电机 PWM 运行时 USART 溢出(ORE)成簇，字节级丢失→帧丢失，**50ms lease 必触发超时锁存**（架空+落地 100% 复现）
+- **数据**：R17 诊断计数器（v1_dbg_ore 等）实锤；ORE 根因=串口 IRQ 优先级 7 被 RTOS 临界区推迟（R18 已提至 4，ORE 25→4，-84%）
+- **当前**：固件接受 lease ≤500（R17 临时放宽），host 实发 200ms——**行驶不再卡顿，但偏离规范 [10,50]**
+- **请求**：①批准 200ms 作为台架/实车过渡值；②物理层整治（串口线远离电机线/短/双绞/磁环）后回到 50ms
+- **对 Jetson host 的影响**：node.py 的 lease 处理需兼容（若保持 50ms，实车驱动会复现同样卡顿）
+
+### 已知现象（待查）
+- 板子从开机起持续收到 ~2000 B/s 的线级流量/噪声（ORE 计数速率反推）——来源未明（串口线悬空噪声？CH9102 行为？），整治前建议逻辑分析仪抓一次
+- DMA 收据改造（R19 尝试）**已回滚**：寄存器配置肉眼全对但 DMA 不搬运（ORE 暴涨、NDTR 冻结），需逻辑分析仪或改用 ST HAL 抽象重做，详见 git 历史/交接文档
+
+### host 工具（本次入库 tools/）
+- `chassis_host.py`：Python 交互控制类（car.forward/back/rotate/turn/strafe/move_mm/stop/status），后台线程 100Hz+lease，故障自动刹停+重握手
+- `uart_v1_test.py`：协议镜像测试（golden vector 自检+握手+遥测统计）
