@@ -363,8 +363,10 @@ void serial_init(void)
     USART3->BRR = (HAL_RCC_GetPCLK1Freq() + V1_BAUD / 2U) / V1_BAUD;
     USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
     USART3->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
-    NVIC_SetPriority(USART1_IRQn, 7U);
-    NVIC_SetPriority(USART3_IRQn, 7U);
+    /* [AI] R18: 优先级 7->4(低于 RTOS 临界区阈值 5,不被 BASEPRI 掩盖)。
+       本 ISR 不调用任何 FreeRTOS API,合规;ORE 实测来自被推迟导致的字节丢失。 */
+    NVIC_SetPriority(USART1_IRQn, 4U);
+    NVIC_SetPriority(USART3_IRQn, 4U);
     NVIC_EnableIRQ(USART1_IRQn);
     NVIC_EnableIRQ(USART3_IRQn);
 
