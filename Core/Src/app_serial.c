@@ -27,7 +27,7 @@
 #define V1_BOARD_ID    0x0407U
 #define V1_FW_VERSION  ((1UL << 16) | (16UL << 8) | 0UL)  /* minor=R 号 */
 #define V1_LEASE_MIN   10U
-#define V1_LEASE_MAX   50U
+#define V1_LEASE_MAX   500U   /* [AI] R17 台架临时放宽(规范 50):量化电机干扰对 RX 的影响 */
 #define V1_UV_MV       10500U         /* 欠压阈值(3S),可调 */
 #define V1_PEER_OFF_MS 500U           /* 0x031 静默多久算对端离线 */
 #define V1_PLEN_MAX    128U
@@ -138,6 +138,13 @@ static uint32_t v1_fault_prev;     /* FAULT_EVENT 上升沿检测 */
 static uint16_t v1_state_div;
 static uint16_t v1_tx_seq = 1U;
 
+/* [AI] R17 RX 诊断(SWD 直读):定位电机干扰下丢帧的具体形式 */
+volatile uint32_t v1_dbg_bytes;     /* 收到的 wire 字节(含定界符) */
+volatile uint32_t v1_dbg_frames;    /* 通过 CRC 的 v1 帧 */
+volatile uint32_t v1_dbg_crc_bad;   /* CRC 失败帧 */
+volatile uint32_t v1_dbg_rejected;  /* 长度/版本/序号/lease 拒绝 */
+volatile uint32_t v1_dbg_ore;       /* USART 溢出(字节级丢失) */
+
 static uint32_t v1_fault_bitmap(uint32_t now)
 {
     uint32_t fb = v1_fault_latch;
@@ -204,7 +211,11 @@ static void v1_frame(const uint8_t *f, uint16_t len)
     uint16_t plen = (uint16_t)(f[4] | ((uint16_t)f[5] << 8));
     if (plen > V1_PLEN_MAX || len != (uint16_t)(6U + plen + 2U)) return;
     uint16_t crc = v1_crc16(f, (uint16_t)(6U + plen));
-    if (crc != (uint16_t)(f[6U + plen] | ((uint16_t)f[7U + plen] << 8))) return;
+    if (crc != (uint16_t)(f[6U + plen] | ((uint16_t)f[7U + plen] << 8))) {
+        v1_dbg_crc_bad++;
+        return;
+    }
+    v1_dbg_frames++;
     uint16_t seq = (uint16_t)(f[2] | ((uint16_t)f[3] << 8));
     uint32_t now = HAL_GetTick();
 
@@ -225,12 +236,12 @@ static void v1_frame(const uint8_t *f, uint16_t len)
     if (f[1] == 0x10U && plen == 15U) {      /* SET_BASE_VELOCITY */
         if (v1_rx_prev_ok != 0U) {
             uint16_t d = (uint16_t)(seq - v1_rx_prev);
-            if (d == 0U || d > 0x7FFFU) return;   /* 重复/倒退:丢弃不刷 lease */
+            if (d == 0U || d > 0x7FFFU) { v1_dbg_rejected++; return; }
         }
         v1_rx_prev = seq;
         v1_rx_prev_ok = 1U;
         uint16_t lease = (uint16_t)(f[7] | ((uint16_t)f[8] << 8));
-        if (lease < V1_LEASE_MIN || lease > V1_LEASE_MAX) return;
+        if (lease < V1_LEASE_MIN || lease > V1_LEASE_MAX) { v1_dbg_rejected++; return; }
         uint32_t fb = v1_fault_bitmap(now);
         v1_lease_ms = lease;
         v1_last_vel_ms = now;
@@ -256,6 +267,7 @@ static uint8_t  rx_code, rx_block, rx_zero_pending;
 
 static void v1_rx_byte(uint8_t b)
 {
+    v1_dbg_bytes++;
     if (b == 0x00U) {                        /* 帧定界 */
         if (rx_len != 0U) v1_frame(rxf, rx_len);
         rx_len = 0U; rx_code = 0U; rx_block = 0U; rx_zero_pending = 0U;
@@ -315,6 +327,7 @@ void serial_poll_tx(void)
 static void v1_uart_irq(USART_TypeDef *uart, unsigned u)
 {
     uint32_t sr = uart->SR;
+    if ((sr & USART_SR_ORE) != 0U) v1_dbg_ore++;
     if ((sr & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
         uint8_t b = (uint8_t)uart->DR;       /* 读 DR 清 RXNE/ORE */
         if ((sr & USART_SR_RXNE) != 0U) v1_rx_byte(b);
