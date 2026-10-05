@@ -84,5 +84,5 @@ HAL 时基是 **TIM7 @1 kHz**，SysTick 归 FreeRTOS。`stm32f4xx_hal_conf.h` �
 ## 未裁决 / 进行中的事项
 
 - **25 kHz vs 10 kHz 冲突**：台架有一条记录说只有 10 kHz 能出扭矩，25 kHz 试过不出。这是**未裁决风险项**——实测不通过就停下上报，**不许擅自改频率**。
-- **ros2_control 架构变更（计划中，固件未改）**：上位机改走 `ros2_control`，控制契约将从体速度 `(Vx,Vy,ωz)` 改为 **4 轮速 + 6 关节位置**，**麦轮 IK 移到上位机**；本板**必须保留轮级等比饱和**（上位机控制器不做），板载 IMU 收窄为轮级。CAN v3 因臂板烧毁已失效，但代码与文档**保留备用**。详见 [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。
+- **ros2_control 架构变更（计划中，固件未改）**：上位机改走 `ros2_control`，控制契约将从体速度 `(Vx,Vy,ωz)` 改为 **4 轮速 + 7 舵机位置（6 关节 + 1 夹爪）**，**麦轮 IK 移到上位机**；本板**必须保留轮级等比饱和**（上位机控制器不做），板载 IMU 收窄为轮级。`app_servo.c` 需从 6 路扩到 **7 路**。CAN v3 因臂板烧毁已失效，但代码与文档**保留备用**。详见 [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。
 - **UART lease 200 ms 偏离规范 [10,50]**：电机 PWM 运行时 USART ORE 丢字节导致 50 ms 必超时（R18 把串口 IRQ 优先级 7→4 后 ORE 降 84 %）。当前实发 200 ms，**待团队签字**。详见 [`docs/UART-v1-ALIGN.md`](docs/UART-v1-ALIGN.md)。
