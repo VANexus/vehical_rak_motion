@@ -1,0 +1,128 @@
+# 上位机 ros2_control 架构变更 —— 对本仓的影响
+
+- **日期**: 2026-10-05
+- **状态**: **计划中，固件尚未改动**
+- **上游依据**: `rak` 仓 `docs/adr/0007-unified-ros2-control.md`（取代其 ADR-0001）
+- **一句话**: 上位机改走 `ros2_control`，控制契约从「体速度」改为「**轮速 + 关节位置**」，
+  **麦轮逆运动学移到上位机**。
+
+---
+
+## 0. 当前 vs 目标
+
+| | 当前（已实现，R16–R18 台架实测） | 目标（本文件） |
+|---|---|---|
+| 下行 | `(Vx, Vy, ωz)` 体速度 | **4 轮速目标 + 6 关节位置目标** |
+| 麦轮逆运动学 | **本板做**（`Core/Src/app_car.c`） | **移到上位机**（`mecanum_drive_controller`） |
+| 轮级等比饱和 | 本板做（§10.2-1） | **仍由本板做**（见 §3.1）—— 这条不能丢 |
+| 6 路舵机 | TIM8+TIM12 @50 Hz | 不变，但接口改为**关节位置** |
+| CAN v3 | 与臂板通信 | **失效**（臂板烧毁），代码与文档**保留备用** |
+| 板载 IMU | 轮级自稳定（R9–R14） | **不变，仅轮级**（见 §3.3） |
+| 25 kHz 轮环 | 有 | **不变** |
+
+---
+
+## 1. 为什么变
+
+1. **臂板烧毁** → 只剩这一块板，同时管 4 轮 + 6 舵机。CAN 对端不存在，**CAN 链路失效**。
+2. 上位机与下位机之间**只剩 USB 一条链路**。
+3. 上位机改用 `ros2_control`：底盘 `mecanum_drive_controller`、机械臂 `joint_trajectory_controller`，
+   由一个 `hardware_interface::SystemInterface` 插件走 USB。
+4. **舵机必须走关节位置**（MoveIt2 需要 `JointTrajectoryController`）。
+   若底盘仍是体速度级、舵机是关节级，**同一条链路上要跑两套语义** —— 这正是要消除的。
+
+---
+
+## 2. 本板要改什么
+
+### 2.1 移除麦轮逆运动学
+
+`app_car.c` 里 `(Vx,Vy,ωz) → 4 轮速` 的 IK **删掉**，改为**直接接收 4 个轮速目标**。
+
+> 注意：删的是 **IK**，不是整个 `app_car.c`。速度闭环、编码器、限幅、饱和逻辑都留下。
+
+### 2.2 接口改为关节级
+
+- **下行**：4 个轮速目标（rad/s 或 mm/s，待定）+ 6 个关节位置目标
+- **上行**：4 轮速/轮位反馈 + 6 关节位置反馈 + 状态位（沿用现有 fault_bitmap）
+
+### 2.3 保留不动
+
+- 4 路 **25 kHz** 速度闭环
+- 编码器读取
+- 6 路舵机 PWM 生成（`app_servo.c`）
+- 串口物理层（921600 8N1 USB-UART）、COBS + CRC16/CCITT-FALSE 帧格式、序号规则、lease 看门狗
+
+---
+
+## 3. 必须保留 / 新增的 MCU 侧行为
+
+### 3.1 轮级等比饱和（**关键，不能丢**）
+
+**已核实**（2026-10-05，读上位机 `mecanum_drive_controller_parameters.hpp`）：
+上位机的 `mecanum_drive_controller` **只有机体轴级限幅**（`linear.x.*` / `linear.y.*` /
+`angular.z.*`），**没有任何轮级饱和参数** —— 它**不做**四轮等比缩放。
+
+因此 §10.2-1 的硬要求**由本板承担**：
+
+> 收到 4 个轮速目标后，若 `max(|v_i|) > V_LIMIT`，
+> **四个轮速同乘一个系数**缩小；**不得逐轴截断**。
+
+**数学依据**：麦轮运动学是线性的，四个轮速同乘 `k` ⟺ 机体速度 `(Vx,Vy,ωz)` 同乘 `k`，
+**方向不变**。所以把饱和放在轮级**不损失正确性** —— 要求本身没变，
+只是实现位置从"IK 之前"移到了"IK 之后"。
+
+### 3.2 lease 看门狗（沿用，但有时长分歧待签）
+
+当前实发 **200 ms**（`docs/UART-v1-ALIGN.md`：电机 PWM 运行时 USART ORE 导致 50 ms 必超时）。
+上游新增一条线索：**USB 串口的 `latency_timer` 默认 16 ms**，会放大端到端抖动，
+**可能是 50 ms 不达标的真因**。建议先在上位机侧把它设为 1 ms，再复测 50 ms 是否可行。
+
+### 3.3 板载 IMU 收窄为**轮级**
+
+- 板载 IMU **保留**，做**轮级**稳定/滑移补偿（R9–R14 的成果保留）。
+- **机体航向权威已改到上位机的 LSM6DSRTR**（接 Jetson 40-pin SPI，由 `robot_localization` EKF 融合）。
+- 因为本板是**轮级**而非机体级，**不与上位机 Nav2 的 `ωz` 指令冲突**。
+- ⚠️ 若将来把该算法改成**机体级**（自主保持航向），**必须能与 Nav2 的 `ωz` 互斥**，否则互相打架。
+
+---
+
+## 4. 不受影响 / 暂不动
+
+- **CAN v3**（`docs/PROTOCOL.md`、`docs/protocol-signals.yaml`、`docs/gen/can_protocol.h`、
+  `tools/can_check.py`）：**保留原样**。当前无用，但若恢复双板可直接复用。
+  ⚠️ 按 `AGENTS.md`，这些文件在两仓各存一份、改动需同批 —— **本次不碰，不触发该约定**。
+- `app_servo.c` 的 PWM 生成逻辑。
+- **25 kHz**：那条"台架说只有 10 kHz 能出扭矩"的**未裁决冲突**仍需实测，本次不变更频率。
+
+---
+
+## 5. 待与上位机对齐（阻塞实现）
+
+1. **轮速单位与帧格式**：rad/s 还是 mm/s？复用 v1 的 i32 LE 缩放还是改 float32？
+2. **关节位置单位与零位定义** —— **6 路舵机的关节名、零位、方向、限位、PWM 脉宽范围尚未定义**，
+   这是当前最大的空白。
+3. **lease 时长**：200 ms 待签字，或先修 `latency_timer` 再复测 50 ms。
+4. **是否保留 `action_type` 原子动作**（v1.1 曾提案但未实现）—— 新架构下是否还需要。
+5. **上行频率**：现在 100 Hz 遥测，关节级后是否仍 100 Hz。
+
+---
+
+## 6. 顺带记录的既有不一致
+
+- 本仓 `README.md` 第 4 行写"上位机（Jetson）经 **CAN** 以 100 Hz 下发体速度"，
+  但 `docs/UART-v1-ALIGN.md`（R16）与上游 `rak` 仓均为 **USB-UART**。
+  两处需澄清（本次未改 README 正文，仅加指引）。
+- `docs/PROTOCOL.md` §10.2-2 仍写"Nav2 必须换 `nav2_mecanum_controller`"，
+  该表述已过期：上位机用的是 `nav2_mppi_controller` + `motion_model: "Omni"`，
+  新架构下则直接用 `mecanum_drive_controller`。
+- `docs/PROTOCOL.md` §10.3 要求 Jetson 新增 CAN 节点 —— 已作废（Jetson 不接 CAN）。
+
+---
+
+## 7. 参考
+
+- 上游：`rak` 仓 `docs/adr/0007-unified-ros2-control.md`（本变更的决策依据）、
+  `docs/adr/0002-odometry-fusion.md`（EKF 与 TF 权威）、`docs/CONSTRUCTION.md` §6
+- 本仓：`docs/UART-v1-ALIGN.md`（当前 UART v1 实现与实测）、
+  `docs/PROTOCOL.md` §10（已定决定与待办）、`AGENTS.md`（工作约束）

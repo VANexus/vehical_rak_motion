@@ -1,5 +1,11 @@
 # vehical_rak_chassis — 麦轮底盘固件（STM32F407VET6 / C30D）
 
+> ⚠️ **架构变更中（2026-10-05）：先读 [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。**
+> 臂板烧毁后只剩本板（同时管 4 轮 + 6 舵机），CAN 链路失效，上位机改走 `ros2_control`。
+> 控制契约将从「体速度 `(Vx,Vy,ωz)`」改为「**4 轮速 + 6 关节位置**」，
+> **麦轮逆运动学移到上位机**。下面这段描述的是**当前已实现的固件**，改动后即失效。
+> 另：本行下方写"经 CAN"，与 `docs/UART-v1-ALIGN.md` 的 **USB-UART** 不一致，待澄清。
+
 四轮麦轮底盘板：四路 AT8236 电机驱动 + 四路正交编码器 + SSD1306 OLED + CAN 从机。
 上位机（Jetson）经 CAN 以 100 Hz 下发体速度 `(Vx, Vy, ωz)`，本板做逆运动学 + 速度闭环。
 
