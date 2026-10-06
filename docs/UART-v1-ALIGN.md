@@ -66,3 +66,28 @@
 ### host 工具（本次入库 tools/）
 - `chassis_host.py`：Python 交互控制类（car.forward/back/rotate/turn/strafe/move_mm/stop/status），后台线程 100Hz+lease，故障自动刹停+重握手
 - `uart_v1_test.py`：协议镜像测试（golden vector 自检+握手+遥测统计）
+
+---
+
+## R19 实现变更（2026-10-06）
+
+三个**内部**缺陷修复：**协议不变、wire 格式不变、host 侧无需任何改动**。
+（同批还改了 ADC 采样/时钟配置与看门狗钩子，与串口无关，见 git log。）
+
+1. **HELLO_ACK 移出中断**。原先在 USART IRQ 里直接调 `v1_send()`，而 `v1_send()`
+   用静态编帧缓冲，与任务侧的 BASE_STATE / FAULT_EVENT 共用 —— USART 优先级 4
+   高于 FreeRTOS 临界区阈值 5，可随时抢占任务，两块缓冲会互相覆写。
+   现改为 IRQ 只置标志，`serial_v1_tick()` 在任务上下文发。
+   **代价：HELLO_ACK 最坏延迟 1 ms**（1kHz 节拍），host 的重试逻辑不受影响。
+2. **COBS 解码状态按端口各一份**。原先 USART1/USART3 共用一份解码状态，两路
+   字节交错会互相撕帧（悬空端口的线级噪声尤其容易触发——可能与"开机起
+   ~2000 B/s 噪声"那条待查现象相关）。协议层状态（`v1_armed` 等）仍是单份：
+   **同一时刻只应有一个 host 在讲话**。
+3. **TIM6 中断的临界区**。`reset_positions()` 原先用 `taskENTER_CRITICAL()`，
+   但 TIM6 ISR 优先级 2 高于 `configMAX_SYSCALL_INTERRUPT_PRIORITY`(=5)，
+   BASEPRI 屏蔽不到它，临界区是假的。改为直接关 TIM6 的 NVIC 使能。
+
+另：`configCHECK_FOR_STACK_OVERFLOW=2` 与 malloc 失败钩子已开启。栈溢出/堆耗尽
+会关中断空转 → IWDG 复位，OLED 的 `P` 字段显示 `I`。
+**反复复位且 P 字段为 `I`，就是这个原因**（现场量在 `dbg_overflow_task` /
+`dbg_overflow_cnt` / `dbg_malloc_fail_cnt`，SWD 直读）。

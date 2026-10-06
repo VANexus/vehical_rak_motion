@@ -38,6 +38,13 @@
 #define V_CMD_LIMIT    350L   /* counts/ms safety clamp */
 #define RC_TIMEOUT_MS  100U   /* Jetson deadman (design: 100 ms) */
 
+/* [AI]  指令入口反溢出钳位 —— 不是物理限幅（真正的限幅在 ik_wheel_target 的
+   V_CMD_LIMIT）。主机速度是裸 int32，直接进 stabilizer_apply 的 *vx*stab_scale
+   和 IK 的 int32 求和会溢出（有符号溢出 = UB）。这里只为把算术拉回良定义域，
+   取值远超任何真实指令，合法指令的行为不受影响。 */
+#define V_CMD_MAX_MMPS  20000L    /* ±20 m/s */
+#define W_CMD_MAX_CRADS 100000L   /* ±1000 rad/s */
+
 /* Mecanum kinematics: wheel rim speed for body velocity
       v_i = sx*Vx + sy*Vy + sw*(lx+ly)*wz   [mm/s, wz in 0.01 rad/s]
    converted with counts/ms = mm/s * 61600 / (2*pi*32.5 mm) / 1000.
@@ -63,7 +70,7 @@ enum run_mode { IDLE, RUNNING, DONE, STOPPED, FAULT, CALIBRATING, CALIB_DONE };
 enum motor_phase { MOTOR_DRIVE, MOTOR_BRAKE, MOTOR_DONE };
 
 struct motor_state {
-    enum motor_phase phase;
+    volatile enum motor_phase phase;   /* [AI]  ISR 读、任务写 —— 必须 volatile */
     uint32_t started_ms;
     uint32_t last_motion_ms;
     uint32_t brake_started_ms;
@@ -111,11 +118,16 @@ static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R18";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R19";   /* [AI]  extern 声明在 app_car.h */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
 volatile uint8_t  dbg_slip;
+/* [AI]  R19: 25kHz ISR 占用率自测（AGENTS.md 要求实测；DWT 周期计数）。
+   周期 40µs @168MHz = 6720 周期，预算 35% = 2352 周期。SWD 直读这两个量：
+   max 是上电以来的高水位，last 是最近一拍。写 max=0 可清零重测。 */
+volatile uint32_t dbg_isr_last_cycles;
+volatile uint32_t dbg_isr_max_cycles;
 static uint16_t stab_scale = 256U;
 static uint16_t stab_slip_ms;
 
@@ -281,15 +293,38 @@ static void enable_switch_init(void)
     GPIOD->PUPDR = (GPIOD->PUPDR & ~(3UL << 6)) | (2UL << 6); /* pull-down */
 }
 
+/* [AI]  ST 的 stm32f407xx.h 漏掉了 ADC_CR2 的 CAL 位(RM0090 §13.13.3，bit 2)，
+   这里补一个命名常量，避免在初始化里裸写魔数。 */
+#define ADC_CR2_CAL_BIT  (1UL << 2)
+
 static void battery_adc_init(void)
 {
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
     RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
     GPIOB->MODER = (GPIOB->MODER & ~(3UL << 0)) | (3UL << 0);
-    ADC1->SQR1 = 0;
-    ADC1->SQR3 = 8;
-    ADC1->SMPR1 = 7UL << 24;
+    /* [AI]  ADC 公共时钟分频：F407 的 fADC 上限 36 MHz，而 ADC_CCR.ADCPRE
+       复位值 =00(PCLK2/2) 会得到 42 MHz —— 超规格。改 01 → PCLK2/4 = 21 MHz。 */
+    ADC->CCR = ADC_CCR_ADCPRE_0;
+    ADC1->CR1 = 0;
+    ADC1->CR2 = 0;
+    ADC1->SQR1 = 0;                      /* 规则序列长度 = 1 个转换 */
+    ADC1->SQR3 = 8;                      /* 首个转换 = 通道 8 (PB0) */
+    /* [AI]  采样时间：SMPR1 管通道 10..18、SMPR2 管通道 0..9 —— 通道 8 属于
+       SMPR2，每通道 3 bit，SMP8 在 bit[26:24]。原代码写的是 SMPR1(实际落到
+       SMP18)，通道 8 一直用复位的 3 周期采样：100k:10k 分压源阻抗 ~9.1k，
+       71 ns 的采样窗远不足以让采样电容建立，读数系统性偏低 → 10.5V 欠压位
+       可能误触发。改 480 周期(≈23 µs @21MHz)，对 100Hz 采样完全无压力。 */
+    ADC1->SMPR2 = 7UL << 24;
     ADC1->CR2 = ADC_CR2_ADON;
+    for (volatile uint32_t d = 0U; d < 10000U; ++d) { }   /* tSTAB ≥ 3µs */
+    /* [AI]  上电校准（ST 建议每次上电做一次；置位后由硬件清零）。
+       ⚠️ 自旋必须有界：本函数跑在 watchdog_init() 之前，若在这里无界等待，
+       ADC 异常时会永久卡死在 boot 且无人复位。校准约 83 个 ADC 周期
+       (~4µs @21MHz)，10 万次迭代有 ~150× 余量。 */
+    ADC1->CR2 |= ADC_CR2_CAL_BIT;
+    for (uint32_t spins = 0U; spins < 100000U; ++spins) {
+        if ((ADC1->CR2 & ADC_CR2_CAL_BIT) == 0U) break;
+    }
 }
 
 static uint32_t battery_read_mv(void)
@@ -311,9 +346,30 @@ static void watchdog_init(void)
 }
 
 /* ---- control (C2 motor base + four-wheel speed balancing) ---- */
+
+/* [AI]  25kHz ISR 独占状态（previous_count / position_counts / win_sum /
+   duty_q / v_ramp / wheel_speed / encoder_sign 及 motors[].phase）的原子改写。
+   ⚠️ 必须用这一对，不能用 taskENTER_CRITICAL()：TIM6 ISR 优先级 2 高于
+   FreeRTOS 的 configMAX_SYSCALL_INTERRUPT_PRIORITY(=5)，而 taskENTER_CRITICAL()
+   只是把 BASEPRI 抬到 5 —— 优先级数值 <5 的中断根本不受它屏蔽，
+   临界区是"假"的。这里直接关 TIM6 的 NVIC 使能，才是真原子。 */
+static inline void isr_state_lock(void)
+{
+    NVIC_DisableIRQ(TIM6_DAC_IRQn);
+    __DSB();
+    __ISB();
+}
+
+static inline void isr_state_unlock(void)
+{
+    __DSB();
+    __ISB();
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);   /* 期间若挂起，此处放行后立即补跑一拍 */
+}
+
 static void reset_positions(void)
 {
-    taskENTER_CRITICAL();
+    isr_state_lock();
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         enc_tim[i]->CNT = 0;
         previous_count[i] = 0;
@@ -326,7 +382,7 @@ static void reset_positions(void)
         win_sum[i] = 0;
         motors[i].phase = MOTOR_BRAKE;
     }
-    taskEXIT_CRITICAL();
+    isr_state_unlock();
 }
 
 /* [AI]  立即停：四路刹车 + 目标清零（台架/遥控/急停多处复用） */
@@ -719,6 +775,10 @@ void car_control_step(uint32_t now)
 /* ---- 25 kHz control timer (design: PID interrupt every 40 us) ---- */
 static void pid_timer_init(void)
 {
+    /* [AI]  R19: 使能 DWT 周期计数器（ISR 占用率自测用；幂等，其它模块也开过） */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
     uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
     uint32_t timclk = (RCC->CFGR & RCC_CFGR_PPRE1) ? pclk1 * 2U : pclk1;
     uint32_t arr = timclk / PWM_HZ;                 /* 25 kHz */
@@ -825,6 +885,14 @@ uint8_t car_mode(void) { return (uint8_t)mode; }
 void car_can_velocity(int32_t vx_mmps, int32_t vy_mmps, int32_t wz_crads,
                       uint8_t enable, uint32_t now)
 {
+    /* [AI]  入口钳位，见 V_CMD_MAX_MMPS 注释：防下游 int32 溢出(UB) */
+    if (vx_mmps >  V_CMD_MAX_MMPS)  vx_mmps =  V_CMD_MAX_MMPS;
+    if (vx_mmps < -V_CMD_MAX_MMPS)  vx_mmps = -V_CMD_MAX_MMPS;
+    if (vy_mmps >  V_CMD_MAX_MMPS)  vy_mmps =  V_CMD_MAX_MMPS;
+    if (vy_mmps < -V_CMD_MAX_MMPS)  vy_mmps = -V_CMD_MAX_MMPS;
+    if (wz_crads >  W_CMD_MAX_CRADS) wz_crads =  W_CMD_MAX_CRADS;
+    if (wz_crads < -W_CMD_MAX_CRADS) wz_crads = -W_CMD_MAX_CRADS;
+
     cmd_vx_mmps = vx_mmps;
     cmd_vy_mmps = vy_mmps;
     cmd_wz_crads = wz_crads;
@@ -893,6 +961,7 @@ void TIM6_DAC_IRQHandler(void)
 {
     if ((TIM6->SR & TIM_SR_UIF) == 0U) return;
     TIM6->SR = (uint16_t)~TIM_SR_UIF;
+    uint32_t isr_t0 = DWT->CYCCNT;      /* [AI]  R19: 占用率计时起点 */
 
     /* [AI]  急停快速路径: CAN 中断置位 → 本周期(≤40µs)立即刹车锁存（§7.1） */
     if (car_estop_fast_req != 0U) {
@@ -950,5 +1019,13 @@ void TIM6_DAC_IRQHandler(void)
         int dir = forward_dir[i];
         if (dq < 0) { dir = -dir; dq = -dq; }
         motor_drive(i, dir, (unsigned)(dq / 100));
+    }
+
+    /* [AI]  R19: 占用率统计。注意这里量的是"清 UIF 之后到退出"的跨度，
+       不含 NVIC 入栈/出栈（那部分由硬件自动完成，无法从 C 里计时）。 */
+    {
+        uint32_t dt = DWT->CYCCNT - isr_t0;
+        dbg_isr_last_cycles = dt;
+        if (dt > dbg_isr_max_cycles) dbg_isr_max_cycles = dt;
     }
 }
