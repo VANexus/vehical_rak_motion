@@ -11,6 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. [`docs/BOARD-C30D.md`](docs/BOARD-C30D.md) — **引脚与硬件真相**（板载 CAN 在 PD0/PD1；AT8236 无 STBY；无电流采样）
 4. [`docs/PROTOCOL.md`](docs/PROTOCOL.md) + [`docs/protocol-signals.yaml`](docs/protocol-signals.yaml) — CAN 协议 v3
 5. [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md) — **进行中的架构变更**（见下）
+6. [`docs/CUBEMX-SOP.md`](docs/CUBEMX-SOP.md) — **改任何外设/配置前必读**：外设配置一律走 CubeMX（含无头命令参考、生成后必查清单、反模式）
 
 姊妹仓 `vehical_rak_arm` 是同一块板的机械臂角色；上位机是 `VANexus/rak`（Jetson）。
 
@@ -26,6 +27,8 @@ STM32_Programmer_CLI -c port=SWD mode=UR freq=100 \
 python3 tools/can_check.py            # 协议门禁：结构校验 + 向量比对 + CRC 负例，退出码 0 才算过
 python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段
 python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手改）
+
+bash tools/cubemx_lint.sh             # 外设配置门禁：应用层出现寄存器级外设初始化就报错（见 docs/CUBEMX-SOP.md）
 ```
 
 - 只依赖 **STM32CubeCLT 1.22.0**（含 GCC 14.3 / CMake / Ninja / Programmer），`env/activate.sh` 负责探测并前置 PATH。
@@ -40,7 +43,14 @@ python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手�
 
 `HAL_Init` → `SystemClock_Config`（HSE 8 MHz + PLL → 168 MHz，APB1 /4、APB2 /2）→ `MX_GPIO_Init` → 应用初始化四连 `car_init` / `can_init` / `serial_init` / `servo_init` → `osKernelInitialize` / `MX_FREERTOS_Init` / `osKernelStart`。
 
-HAL 时基是 **TIM7 @1 kHz**，SysTick 归 FreeRTOS。`stm32f4xx_hal_conf.h` 里 TIM/CAN/ADC/IWDG/UART 模块多为注释状态——**电机/编码器/CAN/ADC/IWDG/串口/OLED/IMU/舵机全部由应用代码寄存器级实现**，不走 CubeMX，就是为了重生成不覆盖（MX 侧只配 FREERTOS/NVIC/RCC/SYS）。
+HAL 时基是 **TIM7 @1 kHz**，SysTick 归 FreeRTOS。
+
+**外设配置一律由 CubeMX 生成（R20 起）**：`.ioc` 里启用 TIM1/2/3/4/5/6/8/9/10/11/12、CAN1、USART1/3(+DMA)、ADC1、IWDG、DMA，`stm32f4xx_hal_conf.h` 对应模块已打开，初始化落在生成的 `tim.c` / `can.c` / `usart.c` / `adc.c` / `iwdg.c` / `dma.c` / `gpio.c` 里，`main.c` 依次调用 `MX_*_Init()`。**应用层只写逻辑，不再手写寄存器。**
+
+唯一例外是 **25 kHz ISR 的函数体**（`app_car.c` 的 `car_control_isr()`，AGENTS.md §1 的时序预算吃不下 HAL 回调链）——但它也只被生成的 `TIM6_DAC_IRQHandler` 通过 `USER CODE` 块调用，**外设本身仍由 CubeMX 配**。
+
+> 改外设、改配置、加外设 → **必读 [`docs/CUBEMX-SOP.md`](docs/CUBEMX-SOP.md)**（含无头 CubeMX 命令参考）。
+> 门禁：`bash tools/cubemx_lint.sh`（应用层出现寄存器级外设初始化就报错）。
 
 ### 任务与实时环（`Core/Src/freertos.c`）
 
@@ -56,7 +66,7 @@ HAL 时基是 **TIM7 @1 kHz**，SysTick 归 FreeRTOS。`stm32f4xx_hal_conf.h` �
 
 ### 模块划分（`Core/Src`）
 
-- `app_car.c`（最大，核心）— 寄存器级电机/PWM/编码器/ADC/IWDG/TIM6 ISR；100 Hz 监督器状态机（IDLE/REMOTE/ESTOP/FAULT/CALIBRATING + 台架自检）；麦轮 IK（`ik_wheel_target`）与前向运动学；IMU 自稳定（`stabilizer_apply`）；按键长/短按；`build_tag`。顶层常量（PWM_HZ、`ENCODER_COUNTS_PER_REV`、`IK_PERMM`、`forward_dir`、限幅、PI 增益）都在本文件头部。
+- `app_car.c`（最大，核心）— 电机/PWM/编码器/ADC/IWDG 的**运行时控制**（初始化已在生成的 `tim.c` / `adc.c` / `iwdg.c` 里，本文件只做 `HAL_TIM_PWM_Start` / `HAL_TIM_Encoder_Start` / `HAL_ADC_*` / `HAL_IWDG_Refresh` 与 `__HAL_TIM_SET_COMPARE`）；TIM6 **25 kHz 闭环 ISR（`car_control_isr`，函数体寄存器级）**；100 Hz 监督器状态机（IDLE/REMOTE/ESTOP/FAULT/CALIBRATING + 台架自检）；麦轮 IK（`ik_wheel_target`）与前向运动学；IMU 自稳定（`stabilizer_apply`）；按键长/短按；`build_tag`。顶层常量（PWM_HZ、`ENCODER_COUNTS_PER_REV`、`IK_PERMM`、`forward_dir`、限幅、PI 增益）都在本文件头部。
 - `app_can.c` — CAN v3 帧编解码 + CRC8 + RX 队列；三个 bxCAN 邮箱分派 0x030/0x200/0x230；`0x010` 急停在 CAN 中断里置标志，由 25 kHz ISR ≤40 µs 执行刹车（快速路径）。
 - `app_serial.c` — 团队 UART v1：**COBS + CRC16/CCITT-FALSE**，921600 8N1，USART1/USART3；解码在 USART IRQ 逐字节跑，TX 走 TXE 中断续发；lease 看门狗 + 故障位图 + `ID:A` 识别横幅。串口速度指令与 CAN `0x100` **汇入同一条 `car_can_velocity` 路径**。
 - `app_imu.c` — 软 I2C 陀螺仪，ICM20948 / MPU6050 双芯片自动探测，未找到则静默降级；只服务**轮级**自稳定（航向权威在上位机）。

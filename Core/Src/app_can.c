@@ -10,16 +10,15 @@
 #include "app_car.h"
 #include "app_serial.h"
 #include "main.h"
+#include "can.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 
-/* ---- bxCAN1: PD0=RX / PD1=TX (AF9), 1Mbps, APB1 42MHz ---- */
-#define CAN_FMR_REG   (*(__IO uint32_t *)(CAN1_BASE + 0x200U))
-#define CAN_FM1R_REG  (*(__IO uint32_t *)(CAN1_BASE + 0x204U))
-#define CAN_FS1R_REG  (*(__IO uint32_t *)(CAN1_BASE + 0x20CU))
-#define CAN_FA1R_REG  (*(__IO uint32_t *)(CAN1_BASE + 0x21CU))
-#define CAN_sFREG     ((__IO uint32_t *)(CAN1_BASE + 0x240U))
+/* ---- bxCAN1: PD0=RX / PD1=TX (AF9), 1Mbps, APB1 42MHz ----
+   [AI] R20 CubeMX 迁移：引脚/位时序/NVIC 由 MX_CAN1_Init + MspInit 完成
+   （Prescaler=2, BS1=16TQ, BS2=4TQ → 1Mbps@42MHz；CAN1_RX0 IRQ=6）。
+   本文件保留对 TSR 的直读/直写（发送邮箱自愈见 can_tx_task_step）。 */
 
 /* [AI]  CAN v3 帧 ID 与 Data ID（CRC 初值）—— docs/PROTOCOL.md §3 */
 #define CID_SAFETY       0x010U
@@ -89,59 +88,43 @@ static uint16_t build_hash16(void)
     return h;
 }
 
-/* [AI]  ---- 初始化：硬件在本函数，队列在本函数（先于 NVIC 使能创建） ---- */
+/* [AI]  ---- 初始化：过滤器/启动/通知在本函数，队列先于中断使能创建 ---- */
 void can_init(void)
 {
-    RCC->APB1ENR |= RCC_APB1ENR_CAN1EN;
-    (void)RCC->APB1ENR;
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
-    GPIOD->MODER = (GPIOD->MODER & ~(3UL << 0)) | (2UL << 0);      /* PD0 AF */
-    GPIOD->MODER = (GPIOD->MODER & ~(3UL << 2)) | (2UL << 2);      /* PD1 AF */
-    GPIOD->AFR[0] = (GPIOD->AFR[0] & ~0x000000FFUL) | 0x00000099UL;
-
-    CAN1->MCR &= ~CAN_MCR_SLEEP;
-    CAN1->MCR |= CAN_MCR_INRQ | CAN_MCR_ABOM;
-    for (unsigned t = 0U; t < 1000000U; ++t)
-        if (CAN1->MSR & CAN_MSR_INAK) break;
-
-    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-    uint32_t prescaler = (pclk1 / 21U) / 1000000U;
-    if (prescaler == 0U) prescaler = 1U;
-    CAN1->BTR = (3UL << 20) | (15UL << 16) | (prescaler - 1U);
-
-    CAN1->MCR &= ~CAN_MCR_INRQ;
-    for (unsigned t = 0U; t < 1000000U; ++t)
-        if ((CAN1->MSR & CAN_MSR_INAK) == 0U) break;
-
-    CAN_FMR_REG |= CAN_FMR_FINIT;
-    CAN_sFREG[0] = 0U;
-    CAN_sFREG[1] = 0U;
-    CAN_FM1R_REG &= ~CAN_FM1R_FBM0;
-    CAN_FS1R_REG |= CAN_FS1R_FSC0;
-    CAN_FA1R_REG |= CAN_FA1R_FACT0;
-    CAN_FMR_REG &= ~CAN_FMR_FINIT;
-
     rx_queue = xQueueCreate(16U, sizeof(struct can_frame));
-    CAN1->IER |= CAN_IER_FMPIE0;
-    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 6U, 0U);
-    HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
+
+    /* [AI] 过滤器：mask=0 全收（协议分拣在 can_rx_task_step，与寄存器版一致） */
+    CAN_FilterTypeDef flt = {0};
+    flt.FilterBank = 0U;
+    flt.FilterMode = CAN_FILTERMODE_IDMASK;
+    flt.FilterScale = CAN_FILTERSCALE_32BIT;
+    flt.FilterIdHigh = 0U;
+    flt.FilterIdLow = 0U;
+    flt.FilterMaskIdHigh = 0U;
+    flt.FilterMaskIdLow = 0U;
+    flt.FilterFIFOAssignment = CAN_RX_FIFO0;
+    flt.FilterActivation = ENABLE;
+    flt.SlaveStartFilterBank = 14U;
+    if (HAL_CAN_ConfigFilter(&hcan1, &flt) != HAL_OK ||
+        HAL_CAN_Start(&hcan1) != HAL_OK ||
+        HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
+        Error_Handler();   /* [AI] CAN 起不来 = 遥控全失效，boot 即暴露 */
+    }
 }
 
-void CAN1_RX0_IRQHandler(void)
+/* [AI] R20: 由 stm32f4xx_it.c 的 CAN1_RX0_IRQHandler → HAL_CAN_IRQHandler
+   路调到本回调（FIFO0 挂起中断）。drain 到 FMP=0 再返回，减少重入延迟。 */
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
+    CAN_RxHeaderTypeDef hdr;
+    uint8_t d[8];
     BaseType_t woken = pdFALSE;
-    while ((CAN1->RF0R & CAN_RF0R_FMP0) != 0U) {
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) != 0U) {
         struct can_frame f;
-        f.id = (CAN1->sFIFOMailBox[0].RIR >> 21) & 0x7FFU;
-        f.data[0] = (uint8_t)(CAN1->sFIFOMailBox[0].RDLR);
-        f.data[1] = (uint8_t)(CAN1->sFIFOMailBox[0].RDLR >> 8);
-        f.data[2] = (uint8_t)(CAN1->sFIFOMailBox[0].RDLR >> 16);
-        f.data[3] = (uint8_t)(CAN1->sFIFOMailBox[0].RDLR >> 24);
-        f.data[4] = (uint8_t)(CAN1->sFIFOMailBox[0].RDHR);
-        f.data[5] = (uint8_t)(CAN1->sFIFOMailBox[0].RDHR >> 8);
-        f.data[6] = (uint8_t)(CAN1->sFIFOMailBox[0].RDHR >> 16);
-        f.data[7] = (uint8_t)(CAN1->sFIFOMailBox[0].RDHR >> 24);
-        CAN1->RF0R |= CAN_RF0R_RFOM0;
+        for (unsigned k = 0; k < 8U; ++k) d[k] = 0U;
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &hdr, d) != HAL_OK) break;
+        f.id = hdr.StdId;
+        for (unsigned k = 0; k < 8U; ++k) f.data[k] = d[k];
         /* [AI]  急停快速路径：不进队列，置标志由 25kHz ISR 立即执行(≤40µs) */
         if (f.id == CID_SAFETY &&
             crc8(f.data, 7U, DID_SAFETY) == f.data[7] &&
@@ -191,22 +174,18 @@ void can_rx_task_step(void)
     }
 }
 
-/* [AI]  mb=0/1/2 分派三个发送邮箱：同拍连发若共用邮箱，后一帧必被 TME
-   忙跳过（曾致 0x200/0x230 从未上线，见 README4 §二C） */
-static int can_tx(unsigned mb, uint32_t std_id, const uint8_t *d)
+/* [AI] R20 HAL 化：HAL_CAN_AddTxMessage 自动选第一个空邮箱——原"手动分派
+   0/1/2 邮箱"的目的（同拍连发不互踩，README4 §二C）由 HAL 的选箱逻辑
+   天然满足；三邮箱全忙才返回失败（丢帧，下周期重排，语义同寄存器版）。
+   邮箱死锁自愈仍在 can_tx_task_step（TSR 直写 ABRQ，不走 HAL）。 */
+static int can_tx(uint32_t std_id, const uint8_t *d)
 {
-    volatile CAN_TxMailBox_TypeDef *m = &CAN1->sTxMailBox[mb];
-    const uint32_t tme = (mb == 0U) ? CAN_TSR_TME0 :
-                         (mb == 1U) ? CAN_TSR_TME1 : CAN_TSR_TME2;
-    if ((CAN1->TSR & tme) == 0U) return 0;
-    m->TIR = (std_id << 21);
-    m->TDTR = 8U;
-    m->TDLR = (uint32_t)d[0] | ((uint32_t)d[1] << 8) |
-              ((uint32_t)d[2] << 16) | ((uint32_t)d[3] << 24);
-    m->TDHR = (uint32_t)d[4] | ((uint32_t)d[5] << 8) |
-              ((uint32_t)d[6] << 16) | ((uint32_t)d[7] << 24);
-    m->TIR |= CAN_TI0R_TXRQ;
-    return 1;
+    CAN_TxHeaderTypeDef hdr = {0};
+    hdr.StdId = std_id;
+    hdr.IDE = CAN_ID_STD;
+    hdr.RTR = CAN_RTR_DATA;
+    hdr.DLC = 8U;
+    return (HAL_CAN_AddTxMessage(&hcan1, &hdr, d, NULL) == HAL_OK) ? 1 : 0;
 }
 
 /* [AI]  Task_CAN_Tx：1kHz —— 串口回读续发 + 0x030(互锁)每帧 + 0x200(反馈)每 10 帧 */
@@ -217,7 +196,8 @@ void can_tx_task_step(uint32_t now_ms)
     int32_t vx, vy, wz;
     uint8_t d[8];
 
-    serial_poll_tx();                                    /* 1kHz 泵串口 TX */
+    serial_poll_tx();                    /* 1kHz 泵串口 TX（R20: DMA 版） */
+    serial_rx_service(); /* [AI]  R20: RX 循环 DMA 排水→COBS 解码（任务侧轮询） */
     serial_v1_tick(now_ms);          /* [AI]  R16: UART v1 lease 看门狗 + BASE_STATE 节拍 */
 
     /* [AI]  邮箱死锁自愈：错误风暴后 bxCAN 可把邮箱挂在"忙但不再重试"态，
@@ -242,7 +222,7 @@ void can_tx_task_step(uint32_t now_ms)
     put_le16(&d[4], wz);
     d[6] = (uint8_t)((xf_cnt++ & 0xFU) << 4);            /* counter, flags=0 */
     d[7] = crc8(d, 7U, DID_XFER_CH2ARM);
-    (void)can_tx(0U, CID_XFER_CH2ARM, d);                    /* 0x030 @1kHz */
+    (void)can_tx(CID_XFER_CH2ARM, d);                    /* 0x030 @1kHz */
 
     if (++div >= 10U) {
         div = 0U;
@@ -251,7 +231,7 @@ void can_tx_task_step(uint32_t now_ms)
                                   (st & 0x0CU));          /* fault/estop bit2-3 */
         d[6] = (uint8_t)(((fb_cnt++ & 0xFU) << 4) | flags);
         d[7] = crc8(d, 7U, DID_VEL_FB);
-        (void)can_tx(1U, CID_VEL_FB, d);                     /* 0x200 @100 Hz */
+        (void)can_tx(CID_VEL_FB, d);                     /* 0x200 @100 Hz */
 
         if ((st & 0x08U) != 0U) {
             /* [AI]  TODO: EMCY 0x020 事件帧首发+重发 3 次（§3），暂随 DIAG 上报 */
@@ -266,7 +246,7 @@ void can_tx_task_step(uint32_t now_ms)
         d[4] = 0U; d[5] = 0U;
         d[6] = (uint8_t)((ni_seq++ & 0xFU) << 4);
         d[7] = crc8(d, 7U, DID_NODEINFO);
-        (void)can_tx(2U, CID_NODEINFO, d);
+        (void)can_tx(CID_NODEINFO, d);
         serial_push_text(SERIAL_BANNER);   /* [AI]  R15: 串口识别横幅 @1Hz */
     }
 }

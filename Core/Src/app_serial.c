@@ -14,18 +14,31 @@
  * 故障位: 0 急停 1 lease 超时 2 CAN 对端离线(见过 0x031 再丢>500ms 才算,
  *         台架让路) 3 对端故障(0x031 FAULT_CODE) 4 电机 FAULT 5 欠压
  *         (<10.5V) 6 过温(板无传感器恒 0) 7 反馈无效(预留恒 0)。
+ *
+ * R20 CubeMX 迁移: USART1/USART3 的引脚/波特率/DMA/NVIC 全部由
+ * MX_USARTx_UART_Init + MspInit 配置(921600 8N1;RX=循环 DMA,TX=Normal DMA;
+ * IRQ 优先级 5)。本层改为:
+ *   RX  HAL_UARTEx_ReceiveToIdle_DMA 循环武装,不依赖 RxEventCallback
+ *       (其 Size 语义随事件类型变化:IDLE=当前位置/TC=满/HT=半满),任务侧
+ *       1kHz 用 NDTR 差值排水进 COBS 解码器;
+ *   ORE 在 DMA 模式下被 HAL 视为 blocking error(中止 RX DMA 并把 RxState
+ *       置 READY)→ HAL_UART_ErrorCallback 里重武装,否则一次噪声就死 RX;
+ *   TX  帧队列 + 单活动帧 HAL_UART_Transmit_DMA;完成检测/入队/启动全在
+ *       任务上下文(cantx 任务 1kHz 泵),无 ISR 竞态。
+ * 协议层(HELLO/lease/序号/fault 位图)与 R16 完全一致。
  */
 #include "app_serial.h"
 #include "app_can.h"
 #include "app_car.h"
 #include "main.h"
+#include "usart.h"
 #include "stm32f4xx.h"
+#include <string.h>
 
-#define V1_BAUD        921600U
 #define V1_PROTO_VER   1U
 #define V1_FEATURES    0x00000003UL   /* bit0 velocity + bit1 telemetry */
 #define V1_BOARD_ID    0x0407U
-#define V1_FW_VERSION  ((1UL << 16) | (16UL << 8) | 0UL)  /* minor=R 号 */
+#define V1_FW_VERSION  ((1UL << 16) | (20UL << 8) | 0UL)  /* minor=R 号 */
 #define V1_LEASE_MIN   10U
 #define V1_LEASE_MAX   500U   /* [AI] R17 台架临时放宽(规范 50):量化电机干扰对 RX 的影响 */
 #define V1_UV_MV       10500U         /* 欠压阈值(3S),可调 */
@@ -74,33 +87,6 @@ static int32_t get_le32(const uint8_t *p)
     return c.i;
 }
 
-/* ---- 双路 TX 队列 + TXE 中断续发(100Hz×34B≈3.4kB/s,轮询泵喂不满) ---- */
-enum { TXQ = 160 };
-static uint8_t ser_txq[SERIAL_PORTS][TXQ];
-static volatile uint8_t ser_tx_rd[SERIAL_PORTS], ser_tx_wr[SERIAL_PORTS];
-
-static void txq_push(unsigned u, const uint8_t *d, uint16_t n)
-{
-    for (uint16_t i = 0; i < n; ++i) {
-        uint8_t next = (uint8_t)((ser_tx_wr[u] + 1U) % TXQ);
-        if (next == ser_tx_rd[u]) return;   /* 队满截断,下周期重试 */
-        ser_txq[u][ser_tx_wr[u]] = d[i];
-        ser_tx_wr[u] = next;
-    }
-}
-
-void serial_push_text(const char *s)        /* 原始文本(识别横幅),双路 */
-{
-    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
-        for (const char *p = s; *p != '\0'; ++p) {
-            uint8_t next = (uint8_t)((ser_tx_wr[u] + 1U) % TXQ);
-            if (next == ser_tx_rd[u]) break;
-            ser_txq[u][ser_tx_wr[u]] = (uint8_t)*p;
-            ser_tx_wr[u] = next;
-        }
-    }
-}
-
 /* ---- COBS 编码(经典算法,已对协议 golden vector 逐字节手验) ---- */
 static uint16_t v1_cobs_encode(const uint8_t *in, uint16_t n, uint8_t *out)
 {
@@ -137,14 +123,15 @@ static uint32_t v1_fault_latch;    /* bit1 lease 超时锁存,HELLO 清 */
 static uint32_t v1_fault_prev;     /* FAULT_EVENT 上升沿检测 */
 static uint16_t v1_state_div;
 static uint16_t v1_tx_seq = 1U;
-static volatile uint8_t v1_hello_req;   /* [AI]  RX 中断置位 → 任务上下文发 HELLO_ACK */
 
-/* [AI] R17 RX 诊断(SWD 直读):定位电机干扰下丢帧的具体形式 */
+/* [AI] R17 RX 诊断(SWD 直读):定位电机干扰下丢帧的具体形式
+   R20: v1_dbg_ore 口径放宽为"USART 错误重武装次数"(ORE/FE/NE/PE) */
 volatile uint32_t v1_dbg_bytes;     /* 收到的 wire 字节(含定界符) */
 volatile uint32_t v1_dbg_frames;    /* 通过 CRC 的 v1 帧 */
 volatile uint32_t v1_dbg_crc_bad;   /* CRC 失败帧 */
 volatile uint32_t v1_dbg_rejected;  /* 长度/版本/序号/lease 拒绝 */
-volatile uint32_t v1_dbg_ore;       /* USART 溢出(字节级丢失) */
+volatile uint32_t v1_dbg_ore;       /* USART 错误重武装(字节级丢失事件) */
+volatile uint32_t v1_dbg_tx_drop;   /* [AI] R20: TX 帧队列满丢弃数 */
 
 static uint32_t v1_fault_bitmap(uint32_t now)
 {
@@ -166,6 +153,38 @@ static uint8_t v1_state_now(uint32_t fb)
     return v1_armed ? V1_ST_ARMED : V1_ST_DISARMED;
 }
 
+/* ---- TX: 帧队列(每口一份) + 单活动帧 DMA ----
+   [AI] R20: BASE_STATE 23B→wire ≤34B,HELLO_ACK 14B,横幅 4B——
+   144B 上限 = 128B payload 帧 + COBS 最坏 3B + 定界符,留足余量。
+   队满按"帧"整帧丢弃(比字节队列的半帧截断干净),计 v1_dbg_tx_drop。 */
+enum { TXQ_N = 8, TXQ_FRAME_MAX = 144 };
+static uint8_t  txq[SERIAL_PORTS][TXQ_N][TXQ_FRAME_MAX];
+static uint16_t txq_len[TXQ_N];               /* [AI] 与口无关:同一帧两份等长 */
+static uint8_t  txq_head[SERIAL_PORTS], txq_tail[SERIAL_PORTS], txq_cnt[SERIAL_PORTS];
+static uint8_t  tx_active[SERIAL_PORTS][TXQ_FRAME_MAX];   /* DMA 在途缓冲 */
+static uint16_t tx_active_len[SERIAL_PORTS];  /* >0 = 该口有帧在发 */
+
+static void txq_push(unsigned u, const uint8_t *d, uint16_t n)
+{
+    if (n > TXQ_FRAME_MAX) return;
+    if (txq_cnt[u] >= TXQ_N) {
+        v1_dbg_tx_drop++;
+        return;
+    }
+    memcpy(txq[u][txq_head[u]], d, n);
+    txq_len[txq_head[u]] = n;
+    txq_head[u] = (uint8_t)((txq_head[u] + 1U) % TXQ_N);
+    txq_cnt[u]++;
+}
+
+void serial_push_text(const char *s)        /* 原始文本(识别横幅),双路 */
+{
+    uint16_t n = 0U;
+    while (s[n] != '\0' && n < TXQ_FRAME_MAX) n++;
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u)
+        txq_push(u, (const uint8_t *)s, n);
+}
+
 static void v1_send(uint8_t type, const uint8_t *payload, uint16_t plen)
 {
     static uint8_t f[6U + V1_PLEN_MAX + 2U];
@@ -184,8 +203,8 @@ static void v1_send(uint8_t type, const uint8_t *payload, uint16_t plen)
     uint16_t wlen = v1_cobs_encode(f, (uint16_t)(8U + plen), w);
     w[wlen++] = 0x00U;                       /* 定界符 */
     if (++v1_tx_seq > 0x7FFFU) v1_tx_seq = 1U;
-    txq_push(0U, w, wlen);
-    txq_push(1U, w, wlen);
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u)
+        txq_push(u, w, wlen);
 }
 
 static void v1_send_state(uint32_t now, uint32_t fb)
@@ -205,7 +224,7 @@ static void v1_send_state(uint32_t now, uint32_t fb)
     v1_send(0x11, p, 23);
 }
 
-/* ---- RX 帧处理(已过 COBS/长度/CRC;context=USART IRQ) ---- */
+/* ---- RX 帧处理(已过 COBS/长度/CRC;R20 起跑在任务上下文) ---- */
 static void v1_frame(const uint8_t *f, uint16_t len)
 {
     if (len < 8U || f[0] != V1_PROTO_VER) return;
@@ -225,11 +244,15 @@ static void v1_frame(const uint8_t *f, uint16_t len)
         v1_armed = 0U;                       /* [AI] 保守:重新握手即 DISARM */
         v1_rx_prev_ok = 0U;                  /* 序号状态随 HELLO 重置 */
         v1_fault_latch &= ~FB_LEASE;         /* 新握手清 lease 超时锁存 */
-        /* [AI]  HELLO_ACK 不在这里发：本函数跑在 USART IRQ 上下文，而
-           v1_send() 用静态编帧缓冲，与任务侧的 BASE_STATE/FAULT_EVENT
-           共用会互相覆写（USART 优先级 4 可随时抢占任务，taskENTER_CRITICAL
-           也挡不住它）。改为置标志，由 serial_v1_tick() 在任务上下文发。 */
-        v1_hello_req = 1U;
+        /* [AI] R20: 本函数已迁到任务上下文（RX 排水在 serial_rx_service），
+           HELLO_ACK 直接内联发送，删 R16 的中断置标志间接层 */
+        uint8_t p[14];
+        p[0] = (uint8_t)(V1_BOARD_ID & 0xFFU);
+        p[1] = (uint8_t)(V1_BOARD_ID >> 8);
+        put_le32(&p[2], (int32_t)V1_FW_VERSION);
+        put_le32(&p[6], (int32_t)boot_id);
+        put_le32(&p[10], (int32_t)V1_FEATURES);
+        v1_send(0x02, p, 14);
         return;
     }
     if (f[1] == 0x10U && plen == 15U) {      /* SET_BASE_VELOCITY */
@@ -259,11 +282,10 @@ static void v1_frame(const uint8_t *f, uint16_t len)
     /* 其余类型(v1.1 0x13 等):丢弃,host 端自动回退 v1 */
 }
 
-/* ---- RX: COBS 流式解码(USART IRQ 逐字节喂入) ----
-   [AI]  解码状态**按端口各一份**。USART1/USART3 两个 IRQ 同优先级互不抢占，
-   但会交错执行：共用一份状态时，一路收半帧被另一路插进来就会互相撕帧
-   （悬空端口的线级噪声尤其容易触发）。协议层状态(v1_armed 等)仍是单份——
-   同一时刻只应有一个 host 在讲话。 */
+/* ---- RX: COBS 流式解码(任务侧逐字节喂入) ----
+   [AI]  解码状态**按端口各一份**。两路 Type-C 会交错来帧：共用一份状态时，
+   一路收半帧被另一路插进来就会互相撕帧（悬空端口的线级噪声尤其容易触发）。
+   协议层状态(v1_armed 等)仍是单份——同一时刻只应有一个 host 在讲话。 */
 struct v1_rx_state {
     uint8_t  f[6U + V1_PLEN_MAX + 2U];
     uint16_t len;
@@ -295,21 +317,73 @@ static void v1_rx_byte(unsigned u, uint8_t b)
     r->block--;
 }
 
+/* ---- RX DMA 循环缓冲 + 任务侧排水 ---- */
+enum { RXBUF_N = 512U };
+static uint8_t rxbuf[SERIAL_PORTS][RXBUF_N];
+static uint16_t rx_pos[SERIAL_PORTS];          /* 上次排水到的环形位置 */
+static volatile uint8_t rx_resync[SERIAL_PORTS];  /* ORE 重武装后置位 */
+
+/* [AI] 1kHz(cantx 任务):把 DMA 环形缓冲里的新字节灌进 COBS 解码器。
+   位置 = RXBUF_N - NDTR(剩余),即 DMA 已写的字节数;差值排水,支持回绕。 */
+void serial_rx_service(void)
+{
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
+        UART_HandleTypeDef *h = (u == 0U) ? &huart1 : &huart3;
+        if (h->hdmarx == NULL || h->RxState != HAL_UART_STATE_BUSY_RX) continue;
+        uint16_t pos = (uint16_t)(RXBUF_N - __HAL_DMA_GET_COUNTER(h->hdmarx));
+        if (rx_resync[u] != 0U) {
+            /* [AI] 重武装后 DMA 从 0 重填:丢掉旧位置关系并复位解码器
+               (半帧丢弃,协议层靠 CRC/序号自愈;ORE 本身就丢字节) */
+            rx_pos[u] = pos;
+            rx_resync[u] = 0U;
+            v1_rx[u].len = 0U; v1_rx[u].code = 0U;
+            v1_rx[u].block = 0U; v1_rx[u].zero_pending = 0U;
+        }
+        while (rx_pos[u] != pos) {
+            v1_rx_byte(u, rxbuf[u][rx_pos[u]]);
+            rx_pos[u] = (uint16_t)((rx_pos[u] + 1U) % RXBUF_N);
+        }
+    }
+}
+
+/* [AI] R20: USART 错误(ORE/FE/NE/PE)在 DMA 模式下会由 HAL 中止 RX 传输
+   (stm32f4xx_hal_uart.c 把 ORE 视作 blocking error → UART_EndRxTransfer)。
+   不重武装的话一次线级噪声就永久死 RX——R18 的教训在 DMA 下依旧成立。 */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->RxState != HAL_UART_STATE_READY) return;  /* RX 未中止(如 TX 错误) */
+    unsigned u = (huart->Instance == USART1) ? 0U : 1U;
+    v1_dbg_ore++;
+    rx_resync[u] = 1U;
+    (void)HAL_UARTEx_ReceiveToIdle_DMA(huart, rxbuf[u], RXBUF_N);
+}
+
+/* ---- 1kHz 泵(cantx 任务):完成检测 → 出队 → 发起 DMA ----
+   [AI] 全任务上下文,无竞态:同一时刻每口至多一帧在途(tx_active 持有缓冲,
+   队列槽位在复制进 tx_active 后立即释放,不被 DMA 引用)。 */
+void serial_poll_tx(void)
+{
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
+        UART_HandleTypeDef *h = (u == 0U) ? &huart1 : &huart3;
+        if (tx_active_len[u] != 0U) {
+            /* Normal 模式 DMA 发完由 HAL 置 gState=READY */
+            if (h->gState == HAL_UART_STATE_READY) tx_active_len[u] = 0U;
+            else continue;
+        }
+        if (txq_cnt[u] == 0U) continue;
+        uint8_t slot = txq_tail[u];
+        memcpy(tx_active[u], txq[u][slot], txq_len[slot]);
+        tx_active_len[u] = txq_len[slot];
+        txq_tail[u] = (uint8_t)((txq_tail[u] + 1U) % TXQ_N);
+        txq_cnt[u]--;
+        if (HAL_UART_Transmit_DMA(h, tx_active[u], tx_active_len[u]) != HAL_OK)
+            tx_active_len[u] = 0U;   /* [AI] 发起失败(不应发生):弃帧保活 */
+    }
+}
+
 /* ---- 1kHz 节拍:lease 看门狗 + 故障事件 + 100Hz BASE_STATE ---- */
 void serial_v1_tick(uint32_t now)
 {
-    /* [AI]  HELLO_ACK：RX 中断只置标志，编帧/发送统一留在任务上下文
-       （v1_send 的静态缓冲不能跨中断/任务共用，见 v1_frame 内注释） */
-    if (v1_hello_req != 0U) {
-        v1_hello_req = 0U;
-        uint8_t p[14];
-        p[0] = (uint8_t)(V1_BOARD_ID & 0xFFU);
-        p[1] = (uint8_t)(V1_BOARD_ID >> 8);
-        put_le32(&p[2], (int32_t)V1_FW_VERSION);
-        put_le32(&p[6], (int32_t)boot_id);
-        put_le32(&p[10], (int32_t)V1_FEATURES);
-        v1_send(0x02, p, 14);
-    }
     if (v1_armed != 0U && (uint32_t)(now - v1_last_vel_ms) > v1_lease_ms) {
         v1_armed = 0U;                       /* lease 到期:DISARM+锁存 */
         v1_fault_latch |= FB_LEASE;
@@ -330,64 +404,18 @@ void serial_v1_tick(uint32_t now)
     }
 }
 
-/* ---- 1kHz 泵:TXE 空则发首字节并开 TXE 中断,余下由中断续发 ---- */
-void serial_poll_tx(void)
-{
-    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
-        USART_TypeDef *uart = (u == 0U) ? USART1 : USART3;
-        if ((uart->SR & USART_SR_TXE) != 0U && ser_tx_rd[u] != ser_tx_wr[u]) {
-            uart->DR = ser_txq[u][ser_tx_rd[u]];
-            ser_tx_rd[u] = (uint8_t)((ser_tx_rd[u] + 1U) % TXQ);
-            uart->CR1 |= USART_CR1_TXEIE;
-        }
-    }
-}
-
-static void v1_uart_irq(USART_TypeDef *uart, unsigned u)
-{
-    uint32_t sr = uart->SR;
-    if ((sr & USART_SR_ORE) != 0U) v1_dbg_ore++;
-    if ((sr & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
-        uint8_t b = (uint8_t)uart->DR;       /* 读 DR 清 RXNE/ORE */
-        if ((sr & USART_SR_RXNE) != 0U) v1_rx_byte(u, b);
-    }
-    if ((uart->CR1 & USART_CR1_TXEIE) != 0U && (sr & USART_SR_TXE) != 0U) {
-        if (ser_tx_rd[u] != ser_tx_wr[u]) {
-            uart->DR = ser_txq[u][ser_tx_rd[u]];
-            ser_tx_rd[u] = (uint8_t)((ser_tx_rd[u] + 1U) % TXQ);
-        } else {
-            uart->CR1 &= ~USART_CR1_TXEIE;   /* 队列空:关中断 */
-        }
-    }
-}
-
-void USART1_IRQHandler(void) { v1_uart_irq(USART1, 0U); }
-void USART3_IRQHandler(void) { v1_uart_irq(USART3, 1U); }
-
 void serial_init(void)
 {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN;
-    GPIOA->MODER = (GPIOA->MODER & ~((3UL << 18) | (3UL << 20))) |
-                   (2UL << 18) | (2UL << 20);
-    GPIOA->AFR[1] = (GPIOA->AFR[1] & ~0x00000FF0UL) | 0x00000770UL;
-    GPIOA->PUPDR = (GPIOA->PUPDR & ~(3UL << 20)) | (1UL << 20);
-    GPIOD->MODER = (GPIOD->MODER & ~((3UL << 16) | (3UL << 18))) |
-                   (2UL << 16) | (2UL << 18);
-    GPIOD->AFR[1] = (GPIOD->AFR[1] & ~0x000000FFUL) | 0x00000077UL;
-    GPIOD->PUPDR = (GPIOD->PUPDR & ~(3UL << 18)) | (1UL << 18);
-
-    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-    RCC->APB1ENR |= RCC_APB1ENR_USART3EN;
-    USART1->BRR = (HAL_RCC_GetPCLK2Freq() + V1_BAUD / 2U) / V1_BAUD;
-    USART3->BRR = (HAL_RCC_GetPCLK1Freq() + V1_BAUD / 2U) / V1_BAUD;
-    USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
-    USART3->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
-    /* [AI] R18: 优先级 7->4(低于 RTOS 临界区阈值 5,不被 BASEPRI 掩盖)。
-       本 ISR 不调用任何 FreeRTOS API,合规;ORE 实测来自被推迟导致的字节丢失。 */
-    NVIC_SetPriority(USART1_IRQn, 4U);
-    NVIC_SetPriority(USART3_IRQn, 4U);
-    NVIC_EnableIRQ(USART1_IRQn);
-    NVIC_EnableIRQ(USART3_IRQn);
+    /* [AI] R20 CubeMX 迁移:引脚/波特率/DMA/NVIC 均由 MX_USARTx_UART_Init
+       + MspInit 完成(RX 引脚上拉补在 usart.c 的 USER CODE 块)。这里只
+       武装循环 DMA 接收 + 算 boot_id。 */
+    for (unsigned u = 0; u < (unsigned)SERIAL_PORTS; ++u) {
+        UART_HandleTypeDef *h = (u == 0U) ? &huart1 : &huart3;
+        rx_pos[u] = 0U;
+        rx_resync[u] = 0U;
+        /* [AI] 武装失败仅可能因上层配置错误;RX 失效但整机照常跑,OLED/SWD 可见 */
+        (void)HAL_UARTEx_ReceiveToIdle_DMA(h, rxbuf[u], RXBUF_N);
+    }
 
     /* boot_id: 每次上电必须不同(host 据此作废旧握手)——取 boot 时刻
        CYCCNT(随 IMU 探测重试等路径抖动)混 tick,保非零 */

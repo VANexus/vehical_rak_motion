@@ -20,6 +20,7 @@ C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘固件。姊妹仓 `veh
 6. 共享常量（引脚、定时器、编码器计数）**单点定义**在板级头文件或 `app_car.c` 顶部，一个物理量只允许一个常数；参考课设与 AI 设计草案里的选型（TB6612、STBY、PB8/PB9 当 CAN、电流保护）**都是错的，不得引用**。
 7. **注释署名约定**：AI/工具产出的注释一律以 `[AI]` 前缀标记（如 `/* [AI] 说明 */`），便于人工区分与回溯（`grep -rn "\[AI\]" Core/` 可列出全部）；**用户原有注释永不删除或改写**，需要调整先征询。
 8. `freertos.c` 的 `defaultTask` 当前在跑**舵机自检扫动（只扫 ch0 = PC6，故意不扫 ch5=PB15 转向舵机口）**——不是业务逻辑，别把它当控制入口去“修”。
+9. **外设配置一律由 CubeMX 生成（R20 起）**。时钟使能、引脚 AF、PSC/ARR、波特率、CAN 位时序、DMA、NVIC——**凡是 CubeMX 界面里有勾选框的，都不许在应用代码里手写寄存器**。改外设走 `.ioc`（GUI 或 `STM32CubeMX -q` 无头脚本，**不手改 `.ioc` 文本**）；应用层只写逻辑、只用生成的 HAL 句柄。唯一例外是 25 kHz ISR 的函数体（时序预算），且它也只由生成的 handler 经 `USER CODE` 块调用。**完整流程、无头命令参考、生成后必查清单、反模式见 [`docs/CUBEMX-SOP.md`](docs/CUBEMX-SOP.md)；门禁 `bash tools/cubemx_lint.sh`。**
 
 ## 构建 / 烧录 / 提交
 
@@ -31,13 +32,14 @@ STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_cha
 python3 tools/can_check.py            # 动了协议就必须通过（退出码 0）；需要 PyYAML
 python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段
 python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手改）
+bash tools/cubemx_lint.sh             # 动了 .ioc / 外设就必须通过（退出码 0）；见 docs/CUBEMX-SOP.md
 ```
 
 - **每条命令都要在同一个 shell 里先 source `env/activate.sh`**——它只改当前 shell 的 PATH，不落盘；分开执行会报 `arm-none-eabi-gcc not found`。
 - 若 activate 报「没找到 STM32CubeCLT」，说明本机没装工具链：构建/烧录**无从验证，别声称构建通过**；此时唯一能跑的门禁是 `python3 tools/can_check.py`。
-- 本仓**没有单元测试框架**；`can_check.py` 是唯一自动化门禁，动了协议必须跑。
+- 本仓**没有单元测试框架**；两个自动化门禁：`can_check.py`（协议）与 `cubemx_lint.sh`（外设配置越界）。动了协议必须跑前者，动了 `.ioc` / 外设必须跑后者。
 - `docs/gen/can_protocol.h` 目前**没有任何固件源文件 include**（`app_can.c` 自带编解码）——重新生成它不会改变固件行为。
 - 新 `.c/.h` 加进**顶层** `CMakeLists.txt`（`cmake/stm32cubemx/` 那份会被 CubeMX 覆盖）；只往 `USER CODE BEGIN/END` 标记对之间写。
-- CubeMX 重生成后必查：`stm32f4xx_it.c` 不得恢复 SVC/PendSV/SysTick 三个 handler；`SystemClock_Config` 的 HSE 设置是否被抹回 HSI。
-- 提交前：Debug + Release 零警告 + `can_check.py` 通过。开工先 `git pull`，收工就 push。
+- CubeMX 重生成后必查（完整清单见 `docs/CUBEMX-SOP.md` §三第 3 步）：`stm32f4xx_it.c` 不得恢复 SVC/PendSV/SysTick 三个 handler；`SystemClock_Config` 的 HSE 设置是否被抹回 HSI；**`main.c` 的 `USER CODE BEGIN 2` 是否排在所有外设 `MX_*_Init()` 之后**；`.ioc` 里启用的每个外设是否都有对应的 `MX_*_Init()`（R20 就漏过 TIM2/TIM5/USART3）。`bash tools/cubemx_lint.sh` 覆盖了其中大部分。
+- 提交前：Debug + Release 零警告 + `can_check.py` 通过（动了协议）+ `cubemx_lint.sh` 通过（动了外设）。开工先 `git pull`，收工就 push。
 - 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_arm` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。

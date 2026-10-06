@@ -17,8 +17,9 @@
    v1.1 原子动作(feature bit3)暂不实现,host 默认自动回退 v1。
    R15 的 'ID:A' 识别横幅保留(1Hz,host 用作设备身份确认,不参与协议)。 */
 
-void serial_init(void);            /* [AI]  调度器前调用:引脚/波特率/NVIC/boot_id */
-void serial_poll_tx(void);         /* [AI]  1kHz(Task_CAN_Tx):泵首字节并开 TXE 中断续发 */
+void serial_init(void);            /* [AI]  调度器前调用:武装 RX 循环 DMA + boot_id(引脚/波特率/NVIC/DMA 由 MX 完成) */
+void serial_poll_tx(void);         /* [AI]  1kHz(Task_CAN_Tx):TX 完成检测 + 出队发 DMA(R20) */
+void serial_rx_service(void);      /* [AI]  R20: 1kHz(Task_CAN_Tx):RX 循环 DMA 排水→COBS 解码 */
 void serial_v1_tick(uint32_t now); /* [AI]  1kHz:lease 看门狗 + 100Hz BASE_STATE + 故障事件 */
 void serial_push_text(const char *s); /* [AI]  识别横幅等原始文本入双路 TX 队列 */
 

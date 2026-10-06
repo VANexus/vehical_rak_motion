@@ -9,6 +9,7 @@
  * 参考：car2/tools/references/smart-transport-robot/01_.../bsp/bsp_c30d.c（已验证套路）
  */
 #include "app_imu.h"
+#include "iwdg.h"
 #include "stm32f4xx.h"
 
 #define ICM_SCL_PIN      10U
@@ -61,9 +62,12 @@ volatile uint8_t  imu_dbg_who;      /* 诊断: 0x68 处 WHO_AM_I 实读值 */
 volatile uint8_t  imu_dbg_lines;    /* 诊断: 静息 (SCL<<1)|SDA, 0b11=两线均被上拉 */
 volatile uint8_t  imu_dbg_who75;    /* 诊断: 0x68 处寄存器 0x75(MPU系 WHO_AM_I) */
 
-/* [AI]  DWT 毫秒延时（boot 路径禁 HAL tick——R3 教训；本驱动自含, 不与 app_car 耦合） */
+/* [AI]  DWT 毫秒延时（boot 路径禁 HAL tick——R3 教训；本驱动自含, 不与 app_car 耦合）
+   [AI] R20: 顺带喂 IWDG——HAL v1.28.3 的 HAL_IWDG_Init 在 MX_IWDG_Init 里就
+   启动了 2s 看门狗,而双芯片探测(各带重试)最坏 ~7s,不喂会在 boot 中途被咬 */
 static void icm_delay_ms(uint32_t ms)
 {
+    (void)HAL_IWDG_Refresh(&hiwdg);
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
     uint32_t start = DWT->CYCCNT;
@@ -147,12 +151,9 @@ static void    icm_bank(uint8_t b)   { icm_write(ICM_REG_BANK_SEL, (uint8_t)(b <
 
 void imu_init(void)
 {
-    /* GPIO: PB10/PB11 通用输出+开漏+上拉 */
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-    (void)RCC->AHB1ENR;
-    GPIOB->MODER = (GPIOB->MODER & ~((3UL << 20) | (3UL << 22))) | (1UL << 20) | (1UL << 22);
-    GPIOB->OTYPER |= (1UL << ICM_SCL_PIN) | (1UL << ICM_SDA_PIN);
-    GPIOB->PUPDR = (GPIOB->PUPDR & ~((3UL << 20) | (3UL << 22))) | (1UL << 20) | (1UL << 22);
+    /* [AI] R20 CubeMX 迁移：PB10/PB11 已由 MX_GPIO_Init 配置为开漏输出
+       （gpio.c, OUTPUT_OD）；总线空闲电平靠外部 10k 上拉（板上有,见文件头），
+       不再内置 GPIO 上拉——与 CubeMX 配置单点一致。 */
     icm_scl(1); icm_sda(1);
     icm_dly();
     imu_dbg_lines = (uint8_t)((((GPIOB->IDR >> ICM_SCL_PIN) & 1U) << 1) |
