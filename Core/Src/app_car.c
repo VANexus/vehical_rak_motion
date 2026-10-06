@@ -122,7 +122,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R20";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
+const char build_tag[] = "R21";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
