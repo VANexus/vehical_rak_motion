@@ -1,10 +1,10 @@
 # Tasks
 
-- [ ] Task 1：锁定 v2 wire contract 与 F407 codec 验证
-  - [ ] 对照 `docs/UART-v2-ALIGN.md` 和现有上位机 v2 协议实现，确认本阶段消息、required features 0/1/2、序号和独立 lease；不修改上位机文件。
-  - [ ] 以测试先行补齐 F407 C codec 的全部消息 payload 结构化编解码及 HELLO/ACK、DRIVE/ARM、状态、安全/诊断帧向量。
-  - [ ] 以测试先行覆盖非法 COBS、版本、payload 长度、CRC、序号、lease、feature mask 和 reserved field 边界。
-  - [ ] 编译运行下位机 standalone v2 codec 测试；如需对照，使用上位机现有 codec/test 只读验证。
+- [x] Task 1：锁定 v2 wire contract 与 F407 codec 验证
+  - [x] 对照 `docs/UART-v2-ALIGN.md` 和现有上位机 v2 协议实现，确认本阶段消息、required features 0/1/2、序号和独立 lease；不修改上位机文件。
+  - [x] 以测试先行补齐 F407 C codec 的全部消息 payload 结构化编解码及 HELLO/ACK、DRIVE/ARM、状态、安全/诊断帧向量。
+  - [x] 以测试先行覆盖非法 COBS、版本、payload 长度、CRC、序号、lease、feature mask 和 reserved field 边界。
+  - [x] 编译运行下位机 standalone v2 codec 测试；如需对照，使用上位机现有 codec/test 只读验证。
 - [ ] Task 2：接入 F407 v2 serial endpoint 与安全状态机（依赖 Task 1）
   - [ ] 以测试先行实现 COBS stream 接收、CRC/长度/版本/序号校验、命令分发和有界 TX。
   - [ ] 实现 HELLO/ACK、DRIVE_COMMAND/STATE、ARM_COMMAND/STATE、DIAGNOSTICS、SAFETY、TIME_SYNC 和 FAULT_EVENT。

@@ -2,8 +2,8 @@
 
 ## 协议与下位机 codec
 
-- [ ] v2 frame/payload 向量与现有上位机 v2 codec 逐字节一致；required features 0/1/2 不变。
-- [ ] F407 测试覆盖坏 COBS、错误版本/长度、坏 CRC、非法/重复/旧序号和序号回绕。
+- [x] v2 frame/payload 向量与现有上位机 v2 codec 逐字节一致；required features 0/1/2 不变。
+- [x] F407 测试覆盖坏 COBS、错误版本/长度、坏 CRC、非法/重复/旧序号和序号回绕。
 - [ ] 未知或无效帧不更新任何命令、状态或 lease。
 - [ ] v1 不作为活动协议接受，也没有自动回退路径。
 - [ ] 下位机 v2 endpoint 支持 HELLO/ACK、drive/arm、状态、诊断、安全、时间同步和 fault event。

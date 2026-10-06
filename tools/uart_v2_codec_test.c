@@ -337,6 +337,25 @@ static void test_state_payload_codecs(void)
                   6U * sizeof(arm.command_position_urad[0])) == 0);
     assert(memcmp(decoded_arm.measured_position_urad, arm.measured_position_urad,
                   6U * sizeof(arm.measured_position_urad[0])) == 0);
+
+    arm.axis_count = 7U;
+    arm.command_position_urad[6] = 13;
+    memcpy(expected, payload, sizeof(expected));
+    expected_length = length;
+    assert(!proto_v2_pack_arm_state(&arm, PROTO_V2_FEATURE_ARM_MEASURED_POSITION,
+                                    payload, sizeof(payload), &length));
+    assert(length == expected_length && memcmp(payload, expected, sizeof(payload)) == 0);
+    assert(proto_v2_pack_arm_state(
+        &arm, PROTO_V2_FEATURE_ARM_MEASURED_POSITION |
+                  PROTO_V2_FEATURE_GRIPPER_SERVO,
+        payload, sizeof(payload), &length));
+    assert(length == 74U);
+    assert(proto_v2_unpack_arm_state(
+        payload, length, PROTO_V2_FEATURE_ARM_MEASURED_POSITION |
+                             PROTO_V2_FEATURE_GRIPPER_SERVO,
+        &decoded_arm));
+    assert(decoded_arm.axis_count == 7U);
+    assert(decoded_arm.command_position_urad[6] == 13);
 }
 
 static void test_diagnostic_payload_codecs(void)
@@ -420,6 +439,7 @@ static void test_new_payload_rejections_are_transactional(void)
     assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
     ack.accepted_features = PROTO_V2_REQUIRED_FEATURES | 0x40U;
     assert(!proto_v2_pack_hello_ack(&ack, payload, sizeof(payload), &length));
+    assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
     ack.accepted_features = PROTO_V2_REQUIRED_FEATURES;
 
     memset(payload, 0xA5, sizeof(payload));
@@ -505,6 +525,60 @@ static void test_new_payload_rejections_are_transactional(void)
                                                    &unchanged_response));
         assert(unchanged_response.host_send_monotonic_ns ==
                0x5A5A5A5A5A5A5A5AULL);
+    }
+
+    {
+        proto_v2_diagnostics_t unchanged_diagnostics;
+        proto_v2_hello_ack_t unchanged_ack;
+        proto_v2_hello_t unchanged_hello;
+        proto_v2_arm_state_t unchanged_arm;
+        uint64_t unchanged_time = 0xA5A5A5A5A5A5A5A5ULL;
+        static const uint8_t invalid_ack[] = {
+            0x07U, 0x04U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
+            0x03U, 0U, 0U, 0U
+        };
+
+        memset(payload, 0xA5, sizeof(payload));
+        memcpy(before, payload, sizeof(payload));
+        length = 0xA5U;
+        assert(!proto_v2_pack_time_sync_request(1U, payload, 7U, &length));
+        assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
+        assert(!proto_v2_pack_time_sync_response(
+            &(proto_v2_time_sync_response_t){0U, 0U, 0U},
+            payload, 23U, &length));
+        assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
+        assert(!proto_v2_pack_diagnostics(
+            &(proto_v2_diagnostics_t){0}, payload, 35U, &length));
+        assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
+
+        memset(&unchanged_time, 0x5A, sizeof(unchanged_time));
+        assert(!proto_v2_unpack_time_sync_request(payload, 7U, &unchanged_time));
+        assert(unchanged_time == 0x5A5A5A5A5A5A5A5AULL);
+        memset(&unchanged_diagnostics, 0x5A, sizeof(unchanged_diagnostics));
+        assert(!proto_v2_unpack_diagnostics(payload, 35U, &unchanged_diagnostics));
+        assert(unchanged_diagnostics.device_uptime_us ==
+               0x5A5A5A5A5A5A5A5AULL);
+        memset(&unchanged_ack, 0x5A, sizeof(unchanged_ack));
+        assert(!proto_v2_unpack_hello_ack(invalid_ack, sizeof(invalid_ack),
+                                          &unchanged_ack));
+        assert(unchanged_ack.board_id == 0x5A5AU);
+        memset(&unchanged_hello, 0x5A, sizeof(unchanged_hello));
+        assert(!proto_v2_unpack_hello(payload, 8U, &unchanged_hello));
+        assert(unchanged_hello.host_build_id == 0x5A5A5A5AU);
+
+        memset(&unchanged_arm, 0x5A, sizeof(unchanged_arm));
+        arm.mode = 1U;
+        arm.axis_count = 6U;
+        arm.measured_valid_mask = 0U;
+        arm.measured_source = 2U;
+        memset(arm.measured_position_urad, 0, sizeof(arm.measured_position_urad));
+        assert(proto_v2_pack_arm_state(&arm, PROTO_V2_FEATURE_ARM_MEASURED_POSITION,
+                                       payload, sizeof(payload), &length));
+        payload[5] = 4U;
+        assert(!proto_v2_unpack_arm_state(payload, length,
+                                          PROTO_V2_FEATURE_ARM_MEASURED_POSITION,
+                                          &unchanged_arm));
+        assert(unchanged_arm.axis_count == 0x5AU);
     }
 }
 
