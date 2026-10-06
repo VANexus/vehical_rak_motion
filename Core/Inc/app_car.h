@@ -17,6 +17,11 @@ void car_start_control_isr(void);      /* [AI]  R3: 25kHz ISR 启动点,Task_Con
 void car_control_step(uint32_t now);   /* 100 Hz, Task_Control */
 void car_feed_watchdog(void);          /* Task_Status */
 
+/* [AI] R20 CubeMX 迁移: 25kHz 闭环真身(原 TIM6_DAC_IRQHandler)。
+   由 stm32f4xx_it.c 的 TIM6_DAC_IRQHandler 在 USER CODE 块内调用;
+   优先级 2 高于 RTOS 临界区阈值,内部禁用 FreeRTOS API/浮点/阻塞。 */
+void car_control_isr(void);
+
 uint32_t car_battery_mv(void);
 uint8_t car_enable_switch(void);
 uint8_t car_mode(void);

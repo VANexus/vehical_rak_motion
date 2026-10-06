@@ -1,5 +1,9 @@
 #include "app_car.h"
 #include "app_imu.h"
+#include "main.h"
+#include "tim.h"
+#include "adc.h"
+#include "iwdg.h"
 #include "stm32f4xx.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -114,11 +118,11 @@ static volatile enum run_mode mode = IDLE;
 static volatile unsigned active_motor;
 volatile uint32_t motor_command;   /* SWD/CAN mailbox: 1=run 2=stop 3=cal */
 
-static uint32_t pwm_arr;           /* 16e6/25e3-1 .. 168e6/25e3-1 */
+static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 168e6/25e3-1) */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R19";   /* [AI]  extern 声明在 app_car.h */
+const char build_tag[] = "R20";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -131,69 +135,34 @@ volatile uint32_t dbg_isr_max_cycles;
 static uint16_t stab_scale = 256U;
 static uint16_t stab_slip_ms;
 
-/* ---- PWM + motor drivers (AT8236, proven mapping) ---- */
-static void gpio_af(GPIO_TypeDef *gpio, unsigned pin, unsigned af)
+/* ---- PWM + motor drivers (AT8236, proven mapping) ----
+   [AI] R20 CubeMX 迁移：TIM1/9/10/11 由 MX_TIMx_Init + MspInit 配置
+   （PSC=0、TIM1 ARR=6719→25kHz@168MHz、各通道 Pulse=0——上电不驱动），
+   本层只启动 PWM 输出并取 ARR 作占空比换算基准。 */
+static void motor_pwm_start(void)
 {
-    gpio->MODER = (gpio->MODER & ~(3UL << (2U * pin))) | (2UL << (2U * pin));
-    gpio->PUPDR = (gpio->PUPDR & ~(3UL << (2U * pin))) | (1UL << (2U * pin));
-    gpio->OTYPER &= ~(1UL << pin);
-    unsigned shift = 4U * (pin % 8U);
-    gpio->AFR[pin / 8U] = (gpio->AFR[pin / 8U] & ~(15UL << shift)) | (af << shift);
-}
-
-static void pwm_timer_init(TIM_TypeDef *t, unsigned channels)
-{
-    t->CR1 = 0;
-    t->PSC = 0;
-    t->ARR = pwm_arr;
-    t->CCR1 = 0;
-    t->CCMR1 = (6U << 4) | (1U << 3); /* PWM1, preload */
-    t->CCER = TIM_CCER_CC1E;
-    if (channels >= 2) {
-        t->CCR2 = 0;
-        t->CCMR1 |= (6U << 12) | (1U << 11);
-        t->CCER |= TIM_CCER_CC2E;
-    }
-    if (channels >= 4) {
-        t->CCR3 = 0; t->CCR4 = 0;
-        t->CCMR2 = (6U << 4) | (1U << 3) | (6U << 12) | (1U << 11);
-        t->CCER |= TIM_CCER_CC3E | TIM_CCER_CC4E;
-    }
-    if (t == TIM1) t->BDTR = TIM_BDTR_MOE;
-    t->EGR = TIM_EGR_UG;
-    t->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
-}
-
-static void motor_pwm_init(void)
-{
-    /* Timer clock: APB2 prescaler != 1 doubles the timer input. */
-    uint32_t pclk2 = HAL_RCC_GetPCLK2Freq();
-    uint32_t timclk = (RCC->CFGR & RCC_CFGR_PPRE2) ? pclk2 * 2U : pclk2;
-    uint32_t div = timclk / PWM_HZ;
-    if (div < 100U) div = 640U;      /* sane floor if the clock fell back */
-    pwm_arr = div - 1U;
-
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN | RCC_AHB1ENR_GPIOEEN;
-    RCC->APB2ENR |= RCC_APB2ENR_TIM1EN | RCC_APB2ENR_TIM9EN |
-                    RCC_APB2ENR_TIM10EN | RCC_APB2ENR_TIM11EN;
-    (void)RCC->APB2ENR;
-    pwm_timer_init(TIM1, 4);
-    pwm_timer_init(TIM9, 2);
-    pwm_timer_init(TIM10, 1);
-    pwm_timer_init(TIM11, 1);
-    gpio_af(GPIOB, 8, 3); gpio_af(GPIOB, 9, 3); /* A: TIM10/TIM11 */
-    gpio_af(GPIOE, 5, 3); gpio_af(GPIOE, 6, 3); /* B: TIM9 */
-    gpio_af(GPIOE, 9, 1); gpio_af(GPIOE, 11, 1); /* C: TIM1 */
-    gpio_af(GPIOE, 13, 1); gpio_af(GPIOE, 14, 1); /* D: TIM1 */
+    pwm_arr = htim1.Init.Period;
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);    /* C/D: PE9/PE11/PE13/PE14 */
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+    HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);    /* B: PE5/PE6 */
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);   /* A: PB8/PB9 */
+    HAL_TIM_PWM_Start(&htim11, TIM_CHANNEL_1);
 }
 
 static void motor_pair(unsigned i, uint32_t forward, uint32_t reverse)
 {
     switch (i) {
-    case 0: TIM10->CCR1 = forward; TIM11->CCR1 = reverse; break;
-    case 1: TIM9->CCR1 = forward; TIM9->CCR2 = reverse; break;
-    case 2: TIM1->CCR1 = forward; TIM1->CCR2 = reverse; break;
-    case 3: TIM1->CCR3 = forward; TIM1->CCR4 = reverse; break;
+    case 0: __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, forward);
+            __HAL_TIM_SET_COMPARE(&htim11, TIM_CHANNEL_1, reverse); break;
+    case 1: __HAL_TIM_SET_COMPARE(&htim9,  TIM_CHANNEL_1, forward);
+            __HAL_TIM_SET_COMPARE(&htim9,  TIM_CHANNEL_2, reverse); break;
+    case 2: __HAL_TIM_SET_COMPARE(&htim1,  TIM_CHANNEL_1, forward);
+            __HAL_TIM_SET_COMPARE(&htim1,  TIM_CHANNEL_2, reverse); break;
+    case 3: __HAL_TIM_SET_COMPARE(&htim1,  TIM_CHANNEL_3, forward);
+            __HAL_TIM_SET_COMPARE(&htim1,  TIM_CHANNEL_4, reverse); break;
     default: break;
     }
 }
@@ -219,37 +188,21 @@ static void motor_stop_all(void)
 /* (brake-all is expressed by setting every phase to MOTOR_BRAKE; the
    ISR writes the actual outputs) */
 
-/* ---- encoders (TIM2/3/4/5 quadrature) ---- */
-static void encoder_init(void)
+/* ---- encoders (TIM2/3/4/5 quadrature) ----
+   [AI] R20 CubeMX 迁移：编码器模式(TI12 双边沿 4 倍频)/引脚/ARR 由
+   MX_TIM2/3/4/5_Init 配置（TIM3/4 16bit、TIM2/5 32bit——与 ISR 的
+   int16/int32 差值逻辑对应），本层只启动计数。 */
+static void encoder_start(void)
 {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN;
-    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN |
-                    RCC_APB1ENR_TIM4EN | RCC_APB1ENR_TIM5EN;
-    (void)RCC->APB1ENR;
-    gpio_af(GPIOA, 15, 1); gpio_af(GPIOB, 3, 1); /* A: TIM2 */
-    gpio_af(GPIOB, 4, 2); gpio_af(GPIOB, 5, 2); /* B: TIM3 */
-    gpio_af(GPIOB, 6, 2); gpio_af(GPIOB, 7, 2); /* C: TIM4 */
-    gpio_af(GPIOA, 0, 2); gpio_af(GPIOA, 1, 2); /* D: TIM5 */
-    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-        TIM_TypeDef *t = enc_tim[i];
-        t->CR1 = 0;
-        t->PSC = 0;
-        t->ARR = (i == 1 || i == 2) ? 0xFFFFU : 0xFFFFFFFFUL;
-        t->CCMR1 = 0xA1A1U;
-        t->CCER = 0;
-        t->SMCR = 3U;      /* quadrature, both edges */
-        t->CNT = 0;
-        t->CR1 = TIM_CR1_CEN;
-    }
+    HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);   /* A: PA15/PB3 */
+    HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);   /* B: PB4/PB5 */
+    HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);   /* C: PB6/PB7 */
+    HAL_TIM_Encoder_Start(&htim5, TIM_CHANNEL_ALL);   /* D: PA0/PA1 */
 }
 
-/* ---- button / enable switch / battery ADC / LED ---- */
-static void button_init(void)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOEEN;
-    GPIOE->MODER &= ~3U;  /* PE0 USER button: active low */
-    GPIOE->PUPDR = (GPIOE->PUPDR & ~3U) | 1U;
-}
+/* ---- button / enable switch / battery ADC / LED ----
+   [AI] R20 CubeMX 迁移：PE0(按键,上拉低有效)/PD3(使能开关,下拉) 已由
+   MX_GPIO_Init 配置，读取走 HAL_GPIO_ReadPin。 */
 
 /* 0 = none, 1 = short press (release edge, held < LONG_PRESS_MS),
    2 = long press (fired once while held >= LONG_PRESS_MS) */
@@ -262,7 +215,7 @@ static int button_pressed_event(uint32_t now)
     static uint32_t changed_at;
     static uint32_t pressed_at;
     static uint8_t long_fired;
-    uint8_t raw = (uint8_t)((GPIOE->IDR & 1U) == 0U);
+    uint8_t raw = (uint8_t)(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);
     int ev = 0;
 
     if (raw != raw_prev) {
@@ -286,64 +239,22 @@ static int button_pressed_event(uint32_t now)
     return ev;
 }
 
-static void enable_switch_init(void)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
-    GPIOD->MODER &= ~(3UL << 6);
-    GPIOD->PUPDR = (GPIOD->PUPDR & ~(3UL << 6)) | (2UL << 6); /* pull-down */
-}
-
-/* [AI]  ST 的 stm32f407xx.h 漏掉了 ADC_CR2 的 CAL 位(RM0090 §13.13.3，bit 2)，
-   这里补一个命名常量，避免在初始化里裸写魔数。 */
-#define ADC_CR2_CAL_BIT  (1UL << 2)
-
-static void battery_adc_init(void)
-{
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
-    GPIOB->MODER = (GPIOB->MODER & ~(3UL << 0)) | (3UL << 0);
-    /* [AI]  ADC 公共时钟分频：F407 的 fADC 上限 36 MHz，而 ADC_CCR.ADCPRE
-       复位值 =00(PCLK2/2) 会得到 42 MHz —— 超规格。改 01 → PCLK2/4 = 21 MHz。 */
-    ADC->CCR = ADC_CCR_ADCPRE_0;
-    ADC1->CR1 = 0;
-    ADC1->CR2 = 0;
-    ADC1->SQR1 = 0;                      /* 规则序列长度 = 1 个转换 */
-    ADC1->SQR3 = 8;                      /* 首个转换 = 通道 8 (PB0) */
-    /* [AI]  采样时间：SMPR1 管通道 10..18、SMPR2 管通道 0..9 —— 通道 8 属于
-       SMPR2，每通道 3 bit，SMP8 在 bit[26:24]。原代码写的是 SMPR1(实际落到
-       SMP18)，通道 8 一直用复位的 3 周期采样：100k:10k 分压源阻抗 ~9.1k，
-       71 ns 的采样窗远不足以让采样电容建立，读数系统性偏低 → 10.5V 欠压位
-       可能误触发。改 480 周期(≈23 µs @21MHz)，对 100Hz 采样完全无压力。 */
-    ADC1->SMPR2 = 7UL << 24;
-    ADC1->CR2 = ADC_CR2_ADON;
-    for (volatile uint32_t d = 0U; d < 10000U; ++d) { }   /* tSTAB ≥ 3µs */
-    /* [AI]  上电校准（ST 建议每次上电做一次；置位后由硬件清零）。
-       ⚠️ 自旋必须有界：本函数跑在 watchdog_init() 之前，若在这里无界等待，
-       ADC 异常时会永久卡死在 boot 且无人复位。校准约 83 个 ADC 周期
-       (~4µs @21MHz)，10 万次迭代有 ~150× 余量。 */
-    ADC1->CR2 |= ADC_CR2_CAL_BIT;
-    for (uint32_t spins = 0U; spins < 100000U; ++spins) {
-        if ((ADC1->CR2 & ADC_CR2_CAL_BIT) == 0U) break;
-    }
-}
-
+/* [AI] R20 CubeMX 迁移：ADC1(PB0/CH8, PCLK2/4 + 480 周期采样 + 软件触发)
+   由 MX_ADC1_Init 配置（原寄存器版的分频/采样时间修正已进 .ioc）；
+   F4 的 HAL 无 ADC 校准 API（无需移植原 CAL 位操作）。 */
 static uint32_t battery_read_mv(void)
 {
-    ADC1->CR2 |= ADC_CR2_SWSTART;
-    for (unsigned spins = 0U; spins < 20000U; ++spins) {
-        if (ADC1->SR & ADC_SR_EOC) return ADC1->DR * 3300UL * 11UL / 4095UL;
+    uint32_t mv = 0U;
+    if (HAL_ADC_Start(&hadc1) == HAL_OK &&
+        HAL_ADC_PollForConversion(&hadc1, 1U) == HAL_OK) {
+        mv = HAL_ADC_GetValue(&hadc1) * 3300UL * 11UL / 4095UL;
     }
-    return 0U;
+    (void)HAL_ADC_Stop(&hadc1);
+    return mv;
 }
 
-static void watchdog_init(void)
-{
-    IWDG->KR = 0x5555U;
-    IWDG->PR = 4U;
-    IWDG->RLR = 1000U;
-    IWDG->KR = 0xAAAAU;
-    IWDG->KR = 0xCCCCU;
-}
+/* [AI] R20: IWDG 已由 MX_IWDG_Init 启动（HAL v1.28.3 的 HAL_IWDG_Init 内含
+   __HAL_IWDG_START，2s 超时）——注意 IMU 探测期间的 boot 喂狗在 app_imu.c */
 
 /* ---- control (C2 motor base + four-wheel speed balancing) ---- */
 
@@ -642,7 +553,7 @@ static void drive_apply(int32_t vx, int32_t vy, int32_t wz)
 void car_control_step(uint32_t now)
 {
     motor_vbat_mv = battery_read_mv();          /* [AI]  100Hz 采样(原在显示层) */
-    enable_switch = (int8_t)((GPIOD->IDR >> 3) & 1U);
+    enable_switch = (int8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) == GPIO_PIN_SET);
 
     /* [AI]  R9: 陀螺仪 100Hz 更新（含静止零偏重置）；"静止"=四路无目标且实测转速≈0 */
     {
@@ -772,60 +683,18 @@ void car_control_step(uint32_t now)
     if (mode == RUNNING) control_bench(now);
 }
 
-/* ---- 25 kHz control timer (design: PID interrupt every 40 us) ---- */
-static void pid_timer_init(void)
-{
-    /* [AI]  R19: 使能 DWT 周期计数器（ISR 占用率自测用；幂等，其它模块也开过） */
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-
-    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
-    uint32_t timclk = (RCC->CFGR & RCC_CFGR_PPRE1) ? pclk1 * 2U : pclk1;
-    uint32_t arr = timclk / PWM_HZ;                 /* 25 kHz */
-    if (arr == 0U || arr > 0x10000U) arr = 3359U;   /* 84 MHz fallback */
-
-    RCC->APB1ENR |= RCC_APB1ENR_TIM6EN;
-    (void)RCC->APB1ENR;
-    TIM6->CR1 = 0;
-    TIM6->PSC = 0;
-    TIM6->ARR = arr - 1U;
-    TIM6->EGR = TIM_EGR_UG;
-    TIM6->SR = 0;
-    TIM6->DIER = TIM_DIER_UIE;
-    TIM6->CR1 = TIM_CR1_CEN;
-
-    NVIC_SetPriority(TIM6_DAC_IRQn, 2U);   /* above the syscall threshold */
-    NVIC_EnableIRQ(TIM6_DAC_IRQn);
-}
+/* ---- 25 kHz control timer (design: PID interrupt every 40 us) ----
+   [AI] R20 CubeMX 迁移：TIM6 由 MX_TIM6_Init 配置（ARR=3359→25kHz@84MHz，
+   NVIC 优先级 2 高于 configMAX_SYSCALL_INTERRUPT_PRIORITY=5——ISR 内禁用
+   FreeRTOS API，原子改写用 NVIC_DisableIRQ 这对真临界区，见 isr_state_lock），
+   本层只负责首拍启动。 */
 
 /* ---- public interface ---- */
 void car_init(void)
 {
-    /* Clock fallback: if SystemClock_Config left us on HSI (its HSE was
-       generated OFF), force HSE->PLL 168 MHz. PWM ARR adapts either way. */
-    SystemCoreClockUpdate();
-    if (SystemCoreClock < 160000000U) {
-        RCC_OscInitTypeDef o = {0};
-        RCC_ClkInitTypeDef c = {0};
-        o.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-        o.HSEState = RCC_HSE_ON;
-        o.PLL.PLLState = RCC_PLL_ON;
-        o.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-        o.PLL.PLLM = 4;
-        o.PLL.PLLN = 168;
-        o.PLL.PLLP = RCC_PLLP_DIV2;
-        o.PLL.PLLQ = 7;
-        if (HAL_RCC_OscConfig(&o) == HAL_OK) {
-            c.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                          RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-            c.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-            c.AHBCLKDivider = RCC_SYSCLK_DIV1;
-            c.APB1CLKDivider = RCC_HCLK_DIV4;
-            c.APB2CLKDivider = RCC_HCLK_DIV2;
-            (void)HAL_RCC_ClockConfig(&c, FLASH_LATENCY_5);
-        }
-        SystemCoreClockUpdate();
-    }
+    /* [AI] R20 CubeMX 迁移：原时钟兜底(HSI→HSE 168MHz)已删——
+       SystemClock_Config 由 CubeMX 生成且 HSE 8MHz+PLL 已确认（AGENTS.md 红线 3，
+       重生成后必查 HSE 未被抹回 HSI）。 */
 
     {
         uint32_t csr = RCC->CSR;
@@ -839,21 +708,19 @@ void car_init(void)
     /* Debugger halts must not starve the watchdog. */
     DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP;
 
-    motor_pwm_init();
-    motor_stop_all();
+    motor_pwm_start();
+    motor_stop_all();      /* [AI] 双保险：MX 已把各 Pulse 配成 0(上电不驱动) */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         motors[i].phase = MOTOR_BRAKE;
         v_cmd[i] = 0;
         v_ramp[i] = 0;
         duty_q[i] = 0;
     }
-    encoder_init();
-    button_init();
-    enable_switch_init();
-    battery_adc_init();
+    encoder_start();
+    /* [AI] 按键(PE0)/使能开关(PD3)/ADC1(PB0)/IWDG 已由 MX_*_Init 配置；
+       IWDG 在 MX_IWDG_Init 即启动(2s)，IMU 探测期间的喂狗在 app_imu.c */
     imu_init();      /* [AI]  R9: 板载 ICM20948 陀螺仪(未找到时静默降级) */
-    watchdog_init();
-    /* [AI]  pid_timer_init 不在此调用：25kHz 中断由 Task_Control 首拍触发
+    /* [AI]  25kHz 中断不在此启动：由 Task_Control 首拍触发
        (car_start_control_isr)，boot 与实时中断解耦（见 README4 §三） */
 }
 
@@ -864,7 +731,10 @@ void car_start_control_isr(void)
 {
     if (control_isr_started != 0U) return;
     control_isr_started = 1U;
-    pid_timer_init();
+    /* [AI]  R19: 使能 DWT 周期计数器（ISR 占用率自测用；幂等） */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    (void)HAL_TIM_Base_Start_IT(&htim6);   /* [AI] CEN+UIE，首拍即进 car_control_isr */
 }
 
 uint8_t car_control_ready(void)       /* [AI]  R16: 0=还在 BOOTING(25kHz 未启动) */
@@ -874,7 +744,7 @@ uint8_t car_control_ready(void)       /* [AI]  R16: 0=还在 BOOTING(25kHz 未�
 
 void car_feed_watchdog(void)
 {
-    IWDG->KR = 0xAAAAU;
+    (void)HAL_IWDG_Refresh(&hiwdg);
 }
 
 uint32_t car_battery_mv(void) { return motor_vbat_mv; }
@@ -956,8 +826,12 @@ void car_wheel_speeds(int32_t *out)   /* counts/ms,四轮 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) out[i] = wheel_speed[i];
 }
 
-/* ---- 25 kHz control ISR: encoder accounting, ramp, PI, PWM ---- */
-void TIM6_DAC_IRQHandler(void)
+/* ---- 25 kHz control ISR: encoder accounting, ramp, PI, PWM ----
+   [AI] R20 CubeMX 迁移：改名 car_control_isr，由 stm32f4xx_it.c 的
+   TIM6_DAC_IRQHandler（CubeMX 生成，USER CODE 块内）调用。UIF 检查/清零
+   保留在本函数：先干活后返回，HAL_TIM_IRQHandler 再查 UIF 已清→空操作。
+   时序预算不变：ISR 内禁浮点/除法链/阻塞，转速/位置/占空比单一写者。 */
+void car_control_isr(void)
 {
     if ((TIM6->SR & TIM_SR_UIF) == 0U) return;
     TIM6->SR = (uint16_t)~TIM_SR_UIF;

@@ -47,13 +47,8 @@ static void oled_data(uint8_t value) { oled_byte(value, 1); }
 
 static void oled_init(void)
 {
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
-    (void)RCC->AHB1ENR;
-    for (unsigned pin = 11; pin <= 14; ++pin) {
-        GPIOD->MODER = (GPIOD->MODER & ~(3UL << (2U * pin))) | (1UL << (2U * pin));
-        GPIOD->OTYPER &= ~(1UL << pin);
-        GPIOD->PUPDR &= ~(3UL << (2U * pin));
-    }
+    /* [AI] R20 CubeMX 迁移：PD11-14 已由 MX_GPIO_Init 配置为推挽输出
+       （gpio.c, OUTPUT_PP），删寄存器版 GPIO 配置块 */
     pin_set(14, 1);
     pin_set(12, 0);
     oled_delay_ms(100);

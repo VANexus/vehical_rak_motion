@@ -115,9 +115,9 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
-  car_init();      /* [AI]  时钟兜底(HSE→168MHz) + 电机/编码器/ADC/看门狗 */
-  can_init();      /* [AI]  CAN 1Mbps + 接收队列 */
-  serial_init();   /* [AI]  Type-C 串口遥控 */
+  car_init();      /* [AI]  R20: 复位原因 + 电机 PWM/编码器启动(IMU 探测;外设初始化已由 MX 完成) */
+  can_init();      /* [AI]  R20: CAN 过滤器/启动/通知 + 接收队列 */
+  serial_init();   /* [AI]  R20: Type-C 串口遥控(武装 RX 循环 DMA) */
   servo_init();    /* [AI]  6 路舵机 TIM8(PC6-9) + TIM12(PB14/15) @50Hz */
   /* USER CODE END 2 */
 

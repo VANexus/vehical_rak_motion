@@ -155,7 +155,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspInit 1 */
-
+  /* [AI] R20: RX(PA10) 补内部上拉——悬空 Type-C 的线级噪声会打 FE/ORE
+     (R18 结论);TX(PA9) 保持 NoPull 不动。 */
+  GPIOA->PUPDR = (GPIOA->PUPDR & ~(3UL << (2U * 10U))) | (1UL << (2U * 10U));
   /* USER CODE END USART1_MspInit 1 */
   }
   else if(uartHandle->Instance==USART3)
@@ -219,7 +221,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
   /* USER CODE BEGIN USART3_MspInit 1 */
-
+  /* [AI] R20: RX(PD9) 补内部上拉,同 USART1(PA10)。 */
+  GPIOD->PUPDR = (GPIOD->PUPDR & ~(3UL << (2U * 9U))) | (1UL << (2U * 9U));
   /* USER CODE END USART3_MspInit 1 */
   }
 }
