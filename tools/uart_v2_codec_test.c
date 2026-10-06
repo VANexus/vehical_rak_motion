@@ -275,17 +275,17 @@ static void test_control_payload_codecs(void)
 static void test_state_payload_codecs(void)
 {
     static const char drive_golden[] =
-        "34 12 01 0f 04 03 02 01 44 33 22 11 08 07 06 05 04 03 02 01 "
+        "34 12 01 0f 04 03 00 00 44 33 22 11 08 07 06 05 04 03 02 01 "
         "01 00 00 00 00 00 00 00 fe ff ff ff ff ff ff ff "
         "03 00 00 00 00 00 00 00 fc ff ff ff ff ff ff ff "
         "05 00 00 00 fa ff ff ff 07 00 00 00 f8 ff ff ff";
     static const char arm_golden[] =
-        "34 12 01 06 15 02 04 03 02 01 08 07 06 05 04 03 02 01 "
+        "34 12 01 06 15 02 04 03 00 00 08 07 06 05 04 03 02 01 "
         "01 00 00 00 fe ff ff ff 03 00 00 00 fc ff ff ff 05 00 00 00 fa ff ff ff "
         "f9 ff ff ff 08 00 00 00 f7 ff ff ff 0a 00 00 00 f5 ff ff ff 0c 00 00 00";
     proto_v2_drive_state_t drive = {
         .echoed_command_sequence = 0x1234U, .mode = 1U,
-        .feedback_valid_mask = 0x0FU, .fault_bitmap = 0x01020304U,
+        .feedback_valid_mask = 0x0FU, .fault_bitmap = 0x00000304U,
         .encoder_epoch = 0x11223344U, .sample_time_us = 0x0102030405060708ULL,
         .wheel_position_urad = {1, -2, 3, -4},
         .wheel_velocity_urad_s = {5, -6, 7, -8}
@@ -293,7 +293,7 @@ static void test_state_payload_codecs(void)
     proto_v2_arm_state_t arm = {
         .echoed_command_sequence = 0x1234U, .mode = 1U, .axis_count = 6U,
         .measured_valid_mask = 0x15U, .measured_source = 2U,
-        .fault_bitmap = 0x01020304U, .sample_time_us = 0x0102030405060708ULL,
+        .fault_bitmap = 0x00000304U, .sample_time_us = 0x0102030405060708ULL,
         .command_position_urad = {1, -2, 3, -4, 5, -6, 0},
         .measured_position_urad = {-7, 8, -9, 10, -11, 12, 0}
     };
@@ -353,7 +353,7 @@ static void test_diagnostic_payload_codecs(void)
     static const struct {
         const char *expected;
         proto_v2_fault_event_t value;
-    } fault = {"78 56 34 12 bc 9a 03", {0x12345678U, 0x9ABCU, 3U}};
+    } fault = {"78 06 00 00 bc 9a 03", {0x00000678U, 0x9ABCU, 3U}};
     proto_v2_diagnostics_t decoded_diagnostics;
     proto_v2_fault_event_t decoded_fault;
     uint8_t payload[PROTO_V2_MAX_PAYLOAD];
@@ -448,6 +448,7 @@ static void test_new_payload_rejections_are_transactional(void)
     assert(!proto_v2_pack_drive_state(&drive, payload, sizeof(payload), &length));
     assert(length == 0xA5U && memcmp(payload, before, sizeof(payload)) == 0);
     drive.fault_bitmap = 0U;
+    drive.feedback_valid_mask = 0U;
     assert(proto_v2_pack_drive_state(&drive, payload, sizeof(payload), &length));
     payload[2] = 2U;
     memset(&decoded_drive, 0x5A, sizeof(decoded_drive));
