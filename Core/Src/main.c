@@ -111,7 +111,9 @@ int main(void)
   MX_TIM12_Init();
   MX_USART1_UART_Init();
   MX_CAN1_Init();
-  MX_CAN2_Init();
+  MX_USART3_UART_Init();
+  MX_TIM2_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
   car_init();      /* [AI]  时钟兜底(HSE→168MHz) + 电机/编码器/ADC/看门狗 */
   can_init();      /* [AI]  CAN 1Mbps + 接收队列 */
