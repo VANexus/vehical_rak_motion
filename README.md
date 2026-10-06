@@ -1,15 +1,20 @@
 # vehical_rak_chassis — 麦轮底盘固件（STM32F407VET6 / C30D）
 
-> ⚠️ **架构变更中（2026-10-05）：先读 [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。**
-> 臂板烧毁后只剩本板（同时管 4 轮 + 6 舵机），CAN 链路失效，上位机改走 `ros2_control`。
-> 控制契约将从「体速度 `(Vx,Vy,ωz)`」改为「**4 轮速 + 6 关节位置**」，
-> **麦轮逆运动学移到上位机**。下面这段描述的是**当前已实现的固件**，改动后即失效。
-> 另：本行下方写"经 CAN"，与 `docs/UART-v1-ALIGN.md` 的 **USB-UART** 不一致，待澄清。
+> 架构依据：[`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。
+> 臂板烧毁后只剩本板，目标由上位机经 `ros2_control` 控制 4 轮、6 轴机械臂
+> 和独立舵机夹爪；CAN v3 仅留作双板时期的备用协议。
+> 本 README 后续板级/构建资料仍有历史状态，协议现状以
+> [`docs/UART-v2-ALIGN.md`](docs/UART-v2-ALIGN.md) 为准。
 
-四轮麦轮底盘板：四路 AT8236 电机驱动 + 四路正交编码器 + SSD1306 OLED + CAN 从机。
-上位机（Jetson）经 CAN 以 100 Hz 下发体速度 `(Vx, Vy, ωz)`，本板做逆运动学 + 速度闭环。
+四轮麦轮底盘板：四路 AT8236 电机驱动 + 四路正交编码器 + SSD1306 OLED。
+当前固件仍实现 UART v1 体速度控制；目标控制架构和 UART v2 规范见
+[`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md) 与
+[`docs/UART-v2-ALIGN.md`](docs/UART-v2-ALIGN.md)。CAN v3 是双板时期的备用协议，
+不属于当前 Jetson 链路。v2 目前只有独立 codec，尚未接入控制 endpoint。
 
-行为约束看本仓 [`AGENTS.md`](AGENTS.md)，**分层设计看 `docs/PROTOCOL.md`（见 docs/PROTOCOL.md 与 AGENTS.md）**，**协议看 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)**。本文件只讲**这个工程**。
+行为约束看本仓 [`AGENTS.md`](AGENTS.md)，架构与当前 UART 目标协议分别见
+[`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md) 与
+[`docs/UART-v2-ALIGN.md`](docs/UART-v2-ALIGN.md)。CAN v3 规范仅适用于历史双板总线。
 
 **新成员直接从 [`docs/QUICKSTART.md`](docs/QUICKSTART.md) 开始**（装环境 → 构建 → 烧录 → 首次上板清单 → 常见坑）。
 

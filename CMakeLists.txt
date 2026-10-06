@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_car.c
     Core/Src/app_can.c
     Core/Src/app_serial.c
+    Core/Src/app_protocol_v2.c
     Core/Src/app_imu.c
     Core/Src/app_oled.c
     Core/Src/app_servo.c
@@ -87,4 +88,3 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_PROJECT_NAME}.bin
     COMMENT "Generating ${CMAKE_PROJECT_NAME}.hex / .bin"
 )
-
