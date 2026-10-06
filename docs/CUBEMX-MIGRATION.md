@@ -171,13 +171,28 @@ cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 
 | 口 | 请求 | Stream / Channel（CubeMX 自动填，仅供核对） | Direction | Mode | Data Width | Priority |
 | --- | --- | --- | --- | --- | --- | --- |
-| USART1 | `USART1_RX` | DMA2 Stream2 / Ch4 | Peripheral To Memory | **Normal** | Byte / Byte | Medium |
+| USART1 | `USART1_RX` | DMA2 Stream2 / Ch4 | Peripheral To Memory | **Circular** | Byte / Byte | Medium |
 | USART1 | `USART1_TX` | DMA2 Stream7 / Ch4 | Memory To Peripheral | **Normal** | Byte / Byte | Medium |
-| USART3 | `USART3_RX` | DMA1 Stream1 / Ch4 | Peripheral To Memory | **Normal** | Byte / Byte | Medium |
+| USART3 | `USART3_RX` | DMA1 Stream1 / Ch4 | Peripheral To Memory | **Circular** | Byte / Byte | Medium |
 | USART3 | `USART3_TX` | DMA1 Stream3 / Ch4 | Memory To Peripheral | **Normal** | Byte / Byte | Medium |
 
 > USART3_RX = DMA1_Stream1/Ch4 已从 ST 官方例程核实；USART1 的两条按 RM0090 Table 43。
 > **以 CubeMX 下拉里能选到的为准** —— 它只让选合法组合。
+
+> **RX 为什么是 Circular**：COBS 帧是变长的，靠空闲线（IDLE）断帧。Normal 模式下每次
+> IDLE 后 DMA 已停，要重新武装，这个窗口里来的字节会丢（连续噪声下尤其容易）。
+> Circular 模式 DMA 永不停止，位置由应用层跟踪、处理环形回绕。**这部分我在应用层做。**
+>
+> **TX 是 Normal**：TX 是"一帧一个 DMA 传输"，传完由 TC 中断接下一帧。
+> 现有的"软件环形缓冲 + TXE 中断续发"（`txq_push` / `serial_poll_tx`）会被换成
+> **帧队列 + DMA**，`HAL_UART_TxCpltCallback` 里启动下一帧。
+>
+> ⚠️ **回调分处两个优先级，别搞混**：
+> - **TX 完成回调**跑在 DMA 中断（优先级 **5**）→ 5 ≥ 阈值 5，**可以**调 FreeRTOS API。
+> - **RX 空闲/错误回调**跑在 USART 中断（优先级 **4**）→ 4 < 阈值 5，**绝对不能**调
+>   FreeRTOS API。它只许写内存（记录长度 + 置标志），解码由 1 kHz 任务做。
+> - 所以 `HAL_UART_Transmit_DMA` 的缓冲区在传输完成前**必须一直有效** → 用帧队列，
+>   不能用会被覆盖的临时栈缓冲。
 
 **NVIC Settings**
 
@@ -217,6 +232,13 @@ cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 > `CAN_BS1_16TQ` = 寄存器 TS1 字段 = **15**，与现有代码 `BTR = (3<<20)|(15<<16)|(2-1)`
 > **逐位等价**（BS2=4→TS2=3、SJW=1→0 同理）。所以填 16/4/1/2 不会改变波特率。
 
+> **走 HAL（已定）**：TX 用 `HAL_CAN_AddTxMessage`（HAL 自动找空邮箱，原来的"三邮箱
+> 分派"变成隐式）；RX 在 `CAN1_RX0_IRQHandler` 里用 `HAL_CAN_GetRxMessage`。
+> CAN ISR 优先级 6 ≥ 阈值 5 → **可以**继续用 `xQueueSendFromISR`，这个不变。
+>
+> **Filter Configuration 标签页留空**：接收过滤器（FIFO0、掩码模式、全通）和
+> `HAL_CAN_Start()` 我在 `USER CODE` 里配，避免和 CubeMX 生成的过滤器冲突。
+
 ### 2.6 GPIO
 
 在芯片图上**右键引脚 → 选功能**。选完 CubeMX 会自动填 AF 号。
@@ -248,6 +270,12 @@ cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 
 > **引脚真值以 `docs/BOARD-C30D.md` 为准**。参考课设里的 TB6612 / STBY / PB8-PB9 当 CAN
 > **都是错的，不要照抄**。
+>
+> **IMU / OLED 也交给 CubeMX（已定）**：这两个是**软件协议**（位操作 I2C / SPI），不是硬件
+> 外设，所以 CubeMX 里只配成普通 GPIO —— 但方向/类型由 CubeMX 单一真源定义，
+> `app_imu.c` / `app_oled.c` 里的 `MODER`/`OTYPER`/`PUPDR` 写入会全部删掉。
+> - PB10/PB11 必须是 **Open Drain**（I2C 线与），应用层仍靠读 `IDR` 取 SDA —— OD 输出模式照样能读。
+> - PD11–PD14 是 Push-Pull 输出（DC/RES/DAT/CLK），初始电平无所谓，应用层初始化时会自己置。
 
 ### 2.7 System Core → NVIC
 
@@ -340,33 +368,46 @@ cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 | --- | --- |
 | `TIM1->CCR1 = pulse` 等 | `__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pulse)`（宏，开销相同） |
 | `pwm_arr` 运行时计算 | 读 `htim1.Init.Period`（CubeMX 固定值），删掉时钟兜底 |
-| `ADC1->CR2 |= SWSTART` + 自旋 | `HAL_ADC_Start` / `HAL_ADC_PollForConversion` / `HAL_ADC_GetValue` |
+| `ADC1->CR2 \|= SWSTART` + 自旋 | `HAL_ADC_Start` / `HAL_ADC_PollForConversion` / `HAL_ADC_GetValue` |
 | `IWDG->KR = 0xAAAA` | `HAL_IWDG_Refresh(&hiwdg)` |
 | `pid_timer_init()` | `HAL_TIM_Base_Start_IT(&htim6)` + DWT 使能 |
-| USART RX 逐字节 + COBS 状态机 | **DMA + 空闲线检测**（`HAL_UARTEx_ReceiveToIdle_DMA`），COBS 解码移到任务 |
-| USART TX 的 TXE 中断续发 | DMA 发送（或保留 TXE 方案，看哪种更稳） |
+| USART RX：逐字节 + COBS 状态机 | **循环 DMA + 空闲线**（`HAL_UARTEx_ReceiveToIdle_DMA`）；回调只记长度置标志，COBS 解码移到 1 kHz 任务 |
+| USART TX：`txq_push` 环形缓冲 + TXE 中断续发 | **帧队列 + DMA**（`HAL_UART_Transmit_DMA`），`HAL_UART_TxCpltCallback` 启动下一帧 |
 | CAN 直接读写邮箱 | `HAL_CAN_AddTxMessage` / `HAL_CAN_GetRxMessage` |
+| `app_imu.c` / `app_oled.c` 的 `MODER`/`OTYPER`/`PUPDR` 写入 | 删掉，改由 CubeMX 的 `MX_GPIO_Init()` 单一真源 |
 
 **会保住的**：25 kHz ISR 的函数体（仍是整数运算、无浮点/除法链/阻塞调用）、
 急停快速路径（CAN ISR 置标志 → 25 kHz ISR ≤40 µs 刹车）、
 麦轮 IK、稳定器、UART v1 协议语义、CAN v3 协议。
 
-**顺带消失的两个 bug**（我上一轮修的）：`v1_send` 静态缓冲竞争、双路 COBS 状态共用 ——
-DMA 化之后 RX 路径整个重写，这两个问题自然不复存在。
+**顺带消失的三个问题**（其中两个是我上一轮修的）：
+`v1_send` 静态缓冲的 ISR/任务竞争、双路 COBS 状态共用、以及 TXE 中断与
+`serial_poll_tx` 对读指针的并发 —— RX/TX 都 DMA 化之后这条路径整体重写，问题不复存在。
+**但重写本身要重新验证**，别当成等价重构。
 
 ---
 
-## 6. 三个需要你拍板的点
+## 6. 已定决策（2026-10-06）
 
-1. **串口 TX 走 DMA 还是保留 TXE 中断续发？**
-   DMA 更"标准"；TXE 方案已经实测过（91 kB/s，零丢帧）。我倾向**先保留 TXE**，
-   只把 RX 换成 DMA —— 一次只动一半，好定位问题。
-2. **CAN 走 HAL 还是保留寄存器级 FIFO 读？**
-   HAL 的 `HAL_CAN_GetRxMessage` 在 CAN ISR 里调，开销比现在直接读寄存器大。
-   急停路径要求 ≤40 µs。我倾向**保留寄存器级读**（handler 由 CubeMX 生成，函数体是我们自己的）。
-3. **IMU / OLED 的位操作引脚要不要交给 CubeMX？**
-   交给 CubeMX = 引脚配置单一真源（更"标准"），但这两个是软件协议、不是外设。
-   我倾向**交给 CubeMX 配成普通 GPIO**，删掉 `app_imu.c`/`app_oled.c` 里的 MODER 写入。
+| # | 决策 | 接受的代价 |
+| --- | --- | --- |
+| 1 | **串口 RX + TX 都走 DMA** | TX 侧"软件环形缓冲 + TXE 中断续发"（`txq_push` / `serial_poll_tx`）整体换成**帧队列 + DMA**。RX 用**循环** DMA。 |
+| 2 | **CAN 走 HAL** | `HAL_CAN_GetRxMessage` 在 CAN ISR（优先级 6）里调，比直读寄存器多约 100–200 周期 —— 1 kHz 帧率下可忽略；急停快速路径仍只是置标志，不受影响。 |
+| 3 | **IMU / OLED 引脚交给 CubeMX** | 两个模块的 GPIO 初始化代码删除，方向/类型由 `MX_GPIO_Init()` 单一真源定义。 |
+
+### 一个我主动保留、不随"全 DMA"改的东西
+
+**USART 中断优先级保持 4**（高于 FreeRTOS 阈值 5），不改回 5。
+
+R18 把串口从 7 提到 4，是因为 USART IRQ 被 RTOS 临界区推迟 → RXNE 没及时取 → ORE 丢字节。
+DMA 之后这个理由**理论上消失了**（搬字节不需要 CPU 参与），放回 5 就能在回调里用
+FreeRTOS API、也更"标准"。
+
+但这条路径在台架上被 ORE 折磨过（见 `docs/UART-v1-ALIGN.md`），**不动它比"理论上更好"值钱**。
+代价很小：回调只写内存（记长度 + 置标志），解码放到已有的 1 kHz 任务节拍里 ——
+100 Hz 的指令率下最坏延迟 1 ms，host 的 200 ms lease 有 200× 余量。
+
+若台架验证稳定，**以后**可以单独一个提交把它放回 5，那时才是纯粹的简化。
 
 ---
 
