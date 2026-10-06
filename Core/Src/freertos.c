@@ -109,10 +109,17 @@ void MX_FREERTOS_Init(void) {
     .name = "cantx", .stack_size = 1024, .priority = (osPriority_t) osPriorityNormal };
   static const osThreadAttr_t stat_attr = {
     .name = "stat", .stack_size = 2048, .priority = (osPriority_t) osPriorityBelowNormal };
-  osThreadNew(task_control, NULL, &ctrl_attr);   /* [AI]  100Hz 监督器 */
-  osThreadNew(task_can_rx, NULL, &canrx_attr);   /* [AI]  CAN 接收解析 */
-  osThreadNew(task_can_tx, NULL, &cantx_attr);   /* [AI]  1kHz 发送 */
-  osThreadNew(task_status, NULL, &stat_attr);    /* [AI]  10Hz 喂狗 */
+  /* [AI]  创建失败 = 堆不足。静默跑下去的后果是 25kHz ISR 永不启动
+     （car_start_control_isr 在 ctrl 线程首拍），而板子看起来"活着"——
+     这是最难查的失败模式，所以显式兜底。 */
+  osThreadId_t h_ctrl  = osThreadNew(task_control, NULL, &ctrl_attr);  /* [AI]  100Hz 监督器 */
+  osThreadId_t h_canrx = osThreadNew(task_can_rx, NULL, &canrx_attr);  /* [AI]  CAN 接收解析 */
+  osThreadId_t h_cantx = osThreadNew(task_can_tx, NULL, &cantx_attr);  /* [AI]  1kHz 发送 */
+  osThreadId_t h_stat  = osThreadNew(task_status, NULL, &stat_attr);   /* [AI]  10Hz 喂狗 */
+  if (defaultTaskHandle == NULL || h_ctrl == NULL || h_canrx == NULL ||
+      h_cantx == NULL || h_stat == NULL) {
+    Error_Handler();
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -131,6 +138,7 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  (void)argument;   /* [AI]  未使用（其余四个任务同款写法），-Wextra 要求显式 */
   /* [AI] 舵机自检：只扫 ch0 = PC6（约 3 秒一轮，循环）
      用途：确认底盘固件 + 舵机代码合并后能正常工作。
      ⚠️ 只在舵机没装到机械臂上时用；装好后要换成正经控制程序。
@@ -183,6 +191,38 @@ static void task_status(void *argument)
     oled_show_step(HAL_GetTick());                  /* [AI]  R13: OLED 调试显示(惰性初始化,内部 5Hz 重绘) */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(100));     /* 10 Hz */
   }
+}
+
+/* [AI]  ---- FreeRTOS 失败钩子（configCHECK_FOR_STACK_OVERFLOW=2 / malloc hook）----
+   板子上没有控制台。做法：把现场留成 SWD 可直读的全局量，然后关中断空转，
+   让 IWDG(2s) 复位。复位原因 'I'(IWDGRSTF) 会显示在 OLED 的 P 字段上
+   （car_reset_cause），所以"反复显示 P I"= 有任务栈溢出或堆耗尽。 */
+volatile char     dbg_overflow_task[configMAX_TASK_NAME_LEN];
+volatile uint32_t dbg_overflow_cnt;
+volatile uint32_t dbg_malloc_fail_cnt;
+
+/* 签名按 FreeRTOS 侧的 char*（cmsis_os2.c 里那份 __WEAK 空实现是
+   signed char*，属 ST 的笔误；强符号覆盖它即可）。 */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName);
+void vApplicationMallocFailedHook(void);
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  dbg_overflow_cnt++;
+  for (unsigned i = 0U; i < configMAX_TASK_NAME_LEN; ++i) {
+    dbg_overflow_task[i] = pcTaskName[i];
+    if (pcTaskName[i] == '\0') break;
+  }
+  taskDISABLE_INTERRUPTS();
+  for (;;) { }
+}
+
+void vApplicationMallocFailedHook(void)
+{
+  dbg_malloc_fail_cnt++;
+  taskDISABLE_INTERRUPTS();
+  for (;;) { }
 }
 
 /* USER CODE END Application */

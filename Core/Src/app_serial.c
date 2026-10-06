@@ -137,6 +137,7 @@ static uint32_t v1_fault_latch;    /* bit1 lease 超时锁存,HELLO 清 */
 static uint32_t v1_fault_prev;     /* FAULT_EVENT 上升沿检测 */
 static uint16_t v1_state_div;
 static uint16_t v1_tx_seq = 1U;
+static volatile uint8_t v1_hello_req;   /* [AI]  RX 中断置位 → 任务上下文发 HELLO_ACK */
 
 /* [AI] R17 RX 诊断(SWD 直读):定位电机干扰下丢帧的具体形式 */
 volatile uint32_t v1_dbg_bytes;     /* 收到的 wire 字节(含定界符) */
@@ -224,13 +225,11 @@ static void v1_frame(const uint8_t *f, uint16_t len)
         v1_armed = 0U;                       /* [AI] 保守:重新握手即 DISARM */
         v1_rx_prev_ok = 0U;                  /* 序号状态随 HELLO 重置 */
         v1_fault_latch &= ~FB_LEASE;         /* 新握手清 lease 超时锁存 */
-        uint8_t p[14];
-        p[0] = (uint8_t)(V1_BOARD_ID & 0xFFU);
-        p[1] = (uint8_t)(V1_BOARD_ID >> 8);
-        put_le32(&p[2], (int32_t)V1_FW_VERSION);
-        put_le32(&p[6], (int32_t)boot_id);
-        put_le32(&p[10], (int32_t)V1_FEATURES);
-        v1_send(0x02, p, 14);
+        /* [AI]  HELLO_ACK 不在这里发：本函数跑在 USART IRQ 上下文，而
+           v1_send() 用静态编帧缓冲，与任务侧的 BASE_STATE/FAULT_EVENT
+           共用会互相覆写（USART 优先级 4 可随时抢占任务，taskENTER_CRITICAL
+           也挡不住它）。改为置标志，由 serial_v1_tick() 在任务上下文发。 */
+        v1_hello_req = 1U;
         return;
     }
     if (f[1] == 0x10U && plen == 15U) {      /* SET_BASE_VELOCITY */
@@ -260,37 +259,57 @@ static void v1_frame(const uint8_t *f, uint16_t len)
     /* 其余类型(v1.1 0x13 等):丢弃,host 端自动回退 v1 */
 }
 
-/* ---- RX: COBS 流式解码(USART IRQ 逐字节喂入) ---- */
-static uint8_t  rxf[6U + V1_PLEN_MAX + 2U];
-static uint16_t rx_len;
-static uint8_t  rx_code, rx_block, rx_zero_pending;
+/* ---- RX: COBS 流式解码(USART IRQ 逐字节喂入) ----
+   [AI]  解码状态**按端口各一份**。USART1/USART3 两个 IRQ 同优先级互不抢占，
+   但会交错执行：共用一份状态时，一路收半帧被另一路插进来就会互相撕帧
+   （悬空端口的线级噪声尤其容易触发）。协议层状态(v1_armed 等)仍是单份——
+   同一时刻只应有一个 host 在讲话。 */
+struct v1_rx_state {
+    uint8_t  f[6U + V1_PLEN_MAX + 2U];
+    uint16_t len;
+    uint8_t  code, block, zero_pending;
+};
+static struct v1_rx_state v1_rx[SERIAL_PORTS];
 
-static void v1_rx_byte(uint8_t b)
+static void v1_rx_byte(unsigned u, uint8_t b)
 {
+    struct v1_rx_state *r = &v1_rx[u];
     v1_dbg_bytes++;
     if (b == 0x00U) {                        /* 帧定界 */
-        if (rx_len != 0U) v1_frame(rxf, rx_len);
-        rx_len = 0U; rx_code = 0U; rx_block = 0U; rx_zero_pending = 0U;
+        if (r->len != 0U) v1_frame(r->f, r->len);
+        r->len = 0U; r->code = 0U; r->block = 0U; r->zero_pending = 0U;
         return;
     }
-    if (rx_block == 0U) {                    /* 取新 code 字节 */
-        if (rx_code != 0U && rx_zero_pending != 0U) {
+    if (r->block == 0U) {                    /* 取新 code 字节 */
+        if (r->code != 0U && r->zero_pending != 0U) {
             /* 上一块隐含一个 0 */
-            if (rx_len >= sizeof(rxf)) { rx_len = 0U; rx_code = 0U; return; }
-            rxf[rx_len++] = 0x00U;
+            if (r->len >= sizeof(r->f)) { r->len = 0U; r->code = 0U; return; }
+            r->f[r->len++] = 0x00U;
         }
-        rx_code = b;
-        rx_zero_pending = (uint8_t)(b != 0xFFU);
-        rx_block = (uint8_t)((b == 0xFFU) ? 254U : (b - 1U));
+        r->code = b;
+        r->zero_pending = (uint8_t)(b != 0xFFU);
+        r->block = (uint8_t)((b == 0xFFU) ? 254U : (b - 1U));
         return;
     }
-    if (rx_len < sizeof(rxf)) rxf[rx_len++] = b;
-    rx_block--;
+    if (r->len < sizeof(r->f)) r->f[r->len++] = b;
+    r->block--;
 }
 
 /* ---- 1kHz 节拍:lease 看门狗 + 故障事件 + 100Hz BASE_STATE ---- */
 void serial_v1_tick(uint32_t now)
 {
+    /* [AI]  HELLO_ACK：RX 中断只置标志，编帧/发送统一留在任务上下文
+       （v1_send 的静态缓冲不能跨中断/任务共用，见 v1_frame 内注释） */
+    if (v1_hello_req != 0U) {
+        v1_hello_req = 0U;
+        uint8_t p[14];
+        p[0] = (uint8_t)(V1_BOARD_ID & 0xFFU);
+        p[1] = (uint8_t)(V1_BOARD_ID >> 8);
+        put_le32(&p[2], (int32_t)V1_FW_VERSION);
+        put_le32(&p[6], (int32_t)boot_id);
+        put_le32(&p[10], (int32_t)V1_FEATURES);
+        v1_send(0x02, p, 14);
+    }
     if (v1_armed != 0U && (uint32_t)(now - v1_last_vel_ms) > v1_lease_ms) {
         v1_armed = 0U;                       /* lease 到期:DISARM+锁存 */
         v1_fault_latch |= FB_LEASE;
@@ -330,7 +349,7 @@ static void v1_uart_irq(USART_TypeDef *uart, unsigned u)
     if ((sr & USART_SR_ORE) != 0U) v1_dbg_ore++;
     if ((sr & (USART_SR_RXNE | USART_SR_ORE)) != 0U) {
         uint8_t b = (uint8_t)uart->DR;       /* 读 DR 清 RXNE/ORE */
-        if ((sr & USART_SR_RXNE) != 0U) v1_rx_byte(b);
+        if ((sr & USART_SR_RXNE) != 0U) v1_rx_byte(u, b);
     }
     if ((uart->CR1 & USART_CR1_TXEIE) != 0U && (sr & USART_SR_TXE) != 0U) {
         if (ser_tx_rd[u] != ser_tx_wr[u]) {
