@@ -111,6 +111,10 @@ static volatile int32_t win_sum[MOTOR_COUNT];          /* counts, 1 ms window */
 static volatile int32_t win_raw[MOTOR_COUNT];          /* [AI] R33: 未归一 1ms 窗增量（判向用，ISR 单写者） */
 static volatile uint32_t win_cnt;
 static volatile int32_t wheel_speed[MOTOR_COUNT];      /* counts/ms, signed */
+/* [AI] R39: 遥测 EMA 滤波值，Q8 定点（256×counts/ms）——M-method ±1 count/ms
+ * 量化噪声 (≈±0.10 rad/s) 压到 1/4 以下；PI 快环仍用原始 wheel_speed 不加滞后。
+ * Q8 避免整型 EMA 的截断死区（第一版 (raw-filt)>>4 在 |差|<16 时冻结——实测）。 */
+static volatile int32_t wheel_filt_q8[MOTOR_COUNT];
 static volatile int32_t v_cmd[MOTOR_COUNT];            /* counts/ms, supervisor */
 static int32_t v_ramp[MOTOR_COUNT];                    /* ISR slew-limited target */
 /* [AI] USB v2 四轮目标通过双槽快照发布，控制任务只读完整帧。 */
@@ -132,7 +136,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R38";   /* [AI] R38: encoder_sign kick 学习结果持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
+const char build_tag[] = "R39";   /* [AI] R39: 遥测 EMA（α=1/16 @1kHz）压 M-method 量化噪声，PI 快环不变；R38: encoder_sign kick 学习持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -757,8 +761,7 @@ void car_control_step(uint32_t now)
             all_learned = (uint8_t)(all_learned && snapshot_signs[i] != 0);
         }
         if (all_learned && (need_store != 0U || store_pending == 0U)) {
-            dbg_sign_save_ret = (uint8_t)sign_store_save(snapshot_signs);
-            if (dbg_sign_save_ret == 0U) {
+            if (sign_store_save(snapshot_signs) == 0U) {
                 sign_store_dirty = 0U;
             }
             store_pending = 1U;   /* 无论成败，本开机不再尝试 */
@@ -1035,6 +1038,7 @@ void car_encoder_snapshot(int64_t pos_urad[MOTOR_COUNT],
                           uint64_t *sample_us)
 {
     int32_t raw_pos[MOTOR_COUNT], raw_spd[MOTOR_COUNT];
+    int32_t filt_q8_snap[MOTOR_COUNT];   /* [AI] R39: EMA Q8 同拍快照 */
     int8_t signs[MOTOR_COUNT];
     uint8_t sampled_mask = 0U;
     uint32_t snapshot_epoch;
@@ -1060,7 +1064,10 @@ void car_encoder_snapshot(int64_t pos_urad[MOTOR_COUNT],
             raw_pos[i] = position_counts[i];
             signs[i] = encoder_sign[i];
             if (signs[i] != 0) {
-                raw_spd[i] = wheel_speed[i];
+                /* [AI] R39: EMA 滤波值以 Q8 存放，此处还原 counts/ms 整数部分
+                   供 encoder_state 走统一换算；亚 LSB 精度由下方 Q8 直换补足 */
+                raw_spd[i] = wheel_filt_q8[i] >> 8;
+                filt_q8_snap[i] = wheel_filt_q8[i];   /* [AI] 临界区内同拍快照 */
                 sampled_mask |= (uint8_t)(1U << i);
             } else {
                 raw_spd[i] = 0;
@@ -1081,6 +1088,16 @@ void car_encoder_snapshot(int64_t pos_urad[MOTOR_COUNT],
     (void)wheel_control_encoder_state(
         raw_pos, raw_spd, sampled_mask, &car_wheel_calibration,
         pos_urad, vel_urad_s, valid_mask);
+    /* [AI] R39: 速度用 Q8 EMA 直换 urad/s——保留 1/256 count 亚 LSB 精度，
+       遥测量化噪声从 ±0.10 rad/s 降到 ±0.4 mrad/s 量级（滤波后）。
+       counts_ms_q8 × (URAD_PER_REV×1000) / (CPR×256) = urad/s（64 位中间量） */
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        if ((sampled_mask & (1U << i)) != 0U) {
+            vel_urad_s[i] = (int32_t)((int64_t)filt_q8_snap[i] *
+                WHEEL_URAD_PER_REV * 1000LL /
+                ((int64_t)car_wheel_calibration.counts_per_revolution[i] << 8));
+        }
+    }
     *epoch = snapshot_epoch;
     *sample_us = snapshot_sample_us;
 }
@@ -1196,6 +1213,8 @@ void car_control_isr(void)
             win_raw[i] = sum;   /* [AI] R33: 判向用原始窗增量（先于归一） */
             if (encoder_sign[i] == 0) continue;
             wheel_speed[i] = sum * encoder_sign[i];       /* counts/ms */
+            /* [AI] R39: 遥测 EMA，α=1/16（τ≈16ms @1kHz），Q8 无截断死区 */
+            wheel_filt_q8[i] += ((wheel_speed[i] << 8) - wheel_filt_q8[i]) >> 4;
             if (estop_latched != 0U) {
                 v_cmd[i] = 0;
                 v_ramp[i] = 0;
