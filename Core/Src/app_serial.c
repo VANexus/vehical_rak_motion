@@ -247,7 +247,9 @@ void serial_v2_tick(uint32_t now_ms)
         if (estop_clear_allowed == 0U || car_estop_clear() == 0U)
             serial_v2_session_reject_drive_clear(&v2_session);
     }
-    if (imu_ready == 0U || calibration_ready == 0U || feedback_fresh == 0U)
+    /* [AI] R34: 前置故障位不再包含 feedback_fresh（其含 vmask==0x0F 要求）——
+     * 未初始化轮需经 kick 学习极性，学习期 vmask<0x0F 属正常状态而非故障 */
+    if (imu_ready == 0U || calibration_ready == 0U)
         external_faults |= 1UL << 5;
     if ((car_flags() & 2U) != 0U)
         external_faults |= 1UL << 0;

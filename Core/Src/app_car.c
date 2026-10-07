@@ -105,6 +105,7 @@ static volatile int32_t duty_q[MOTOR_COUNT];           /* 0.01 %, ISR PI state *
 static struct motor_state motors[MOTOR_COUNT];
 /* 25 kHz control ISR state */
 static volatile int32_t win_sum[MOTOR_COUNT];          /* counts, 1 ms window */
+static volatile int32_t win_raw[MOTOR_COUNT];          /* [AI] R33: 未归一 1ms 窗增量（判向用，ISR 单写者） */
 static volatile uint32_t win_cnt;
 static volatile int32_t wheel_speed[MOTOR_COUNT];      /* counts/ms, signed */
 static volatile int32_t v_cmd[MOTOR_COUNT];            /* counts/ms, supervisor */
@@ -128,7 +129,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R28";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
+const char build_tag[] = "R37";   /* [AI] R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -286,8 +287,6 @@ static inline void isr_state_unlock(void)
 
 static void reset_positions(void)
 {
-    uint8_t calibrated =
-        (uint8_t)wheel_control_calibration_valid(&car_wheel_calibration);
     taskENTER_CRITICAL();
     wheel_control_encoder_generation_write_begin(&encoder_generation);
     isr_state_lock();
@@ -296,13 +295,16 @@ static void reset_positions(void)
         enc_tim[i]->CNT = 0;
         previous_count[i] = 0;
         position_counts[i] = 0;
-        encoder_sign[i] = calibrated != 0U
-            ? car_wheel_calibration.encoder_direction[i] : 0;
+        /* [AI] R31: 恢复自动判向（kick 自检实测"正占空比→计数方向"）。
+         * R30 曾用标定表预设 encoder_sign，与闭环内部约定不一致，
+         * 导致 FL/RR 闭环正反馈飞车——标定表只提供 CPR/半径/杠杆换算。 */
+        encoder_sign[i] = 0;
         duty_q[i] = 0;
         v_ramp[i] = 0;
         v_cmd[i] = 0;
         wheel_speed[i] = 0;
         win_sum[i] = 0;
+        win_raw[i] = 0;   /* [AI] R33 */
         motors[i].phase = MOTOR_BRAKE;
     }
     wheel_control_encoder_generation_write_end(&encoder_generation);
@@ -719,11 +721,14 @@ void car_control_step(uint32_t now)
         }
     }
 
-    /* encoder sign detection */
+    /* encoder sign detection
+     * [AI] R33: 改用 1 ms 窗增量判向（阈值 20 counts/ms ≈ 2 rad/s）。
+     * 旧逻辑用位置累计 |raw|≥100：上电后编码器输入漂移/噪声缓慢累计即可
+     * 误触发，学到随机极性 → 闭环正反馈飞车（实测 A/D 轮 27 rad/s 飞车）。
+     * 窗增量阈值只有真实 kick 转速才够得到；kick 自身 75% 占空比远超阈值。 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-        int32_t raw = position_counts[i];
-        if (encoder_sign[i] == 0 && (raw >= 100 || raw <= -100)) {
-            encoder_sign[i] = raw > 0 ? 1 : -1;
+        if (encoder_sign[i] == 0 && (win_raw[i] >= 20 || win_raw[i] <= -20)) {
+            encoder_sign[i] = win_raw[i] > 0 ? 1 : -1;
             duty_q[i] = 5000;             /* PI hand-off duty */
             v_ramp[i] = wheel_speed[i];   /* hand off at the kick speed */
         }
@@ -857,10 +862,8 @@ void car_init(void)
     atomic_store_explicit(&encoder_generation, 0U, memory_order_relaxed);
     uptime_clock = (wheel_uptime_clock_t){0};
     encoder_epoch = 1U;   /* [AI] R22: 上电纪元从 1 起(0 留给"未初始化") */
-    if (car_wheel_calibration_ready() != 0U) {
-        for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
-            encoder_sign[i] = car_wheel_calibration.encoder_direction[i];
-    }
+    /* [AI] R31: 不再用标定表预设 encoder_sign（car_encoder_reset 内注释），
+     * 保留 kick 自检：ARMED 首驱 kick 一拍→观测 raw 极性→闭环保守接管 */
     /* Debugger halts must not starve the watchdog. */
     DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP;
 
@@ -943,8 +946,9 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
         car_encoder_snapshot(position_urad, measured_urad_s, &valid_mask,
                              &epoch, &sample_us);
         (void)epoch;
-        enable = (uint8_t)(valid_mask == 0x0FU &&
-            wheel_control_sample_fresh_from_clock(
+        /* [AI] R37: 不再要求 valid_mask==0x0F——未初始化轮由输出门开环 kick
+         * 学习极性（kick 仅在 v_cmd 非零时触发），已初始化轮正常闭环 */
+        enable = (uint8_t)(wheel_control_sample_fresh_from_clock(
                 HAL_GetTick, (uint32_t)(sample_us / 1000ULL),
                 (uint8_t)(sample_us != 0U)));
     }
@@ -1147,6 +1151,7 @@ void car_control_isr(void)
         for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
             int32_t sum = win_sum[i];
             win_sum[i] = 0;
+            win_raw[i] = sum;   /* [AI] R33: 判向用原始窗增量（先于归一） */
             if (encoder_sign[i] == 0) continue;
             wheel_speed[i] = sum * encoder_sign[i];       /* counts/ms */
             if (estop_latched != 0U) {
@@ -1168,9 +1173,13 @@ void car_control_isr(void)
     }
 
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        /* [AI] R34: kick 触发条件——未初始化轮仅在"该轮有非零目标"时才开环
+         * 踢动学习极性；零目标永远 BRAKE，避免零指令下轮子意外转动 */
+        uint8_t phase_drive = (uint8_t)(motors[i].phase == MOTOR_DRIVE);
+        if (encoder_sign[i] == 0 && v_cmd[i] == 0) phase_drive = 0U;
         car_motor_output_t output = car_motor_output_gate(
             estop_latched, (uint8_t)(mode == CALIBRATING),
-            (uint8_t)(motors[i].phase == MOTOR_DRIVE),
+            phase_drive,
             (uint8_t)(encoder_sign[i] == 0), forward_dir[i], duty_q[i]);
         if (output.reset_controller != 0U) {
             v_cmd[i] = 0;

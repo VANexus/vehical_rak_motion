@@ -6,12 +6,19 @@
 
 #define WHEEL_URAD_S_PER_REV_MS (WHEEL_URAD_PER_REV * 1000LL)
 
+/* [AI] R30: v2 首次实驱烟测标定表（车轮架空、低速、有急停前提下使用）。
+ * 数值出处（均为历史台架/设计值，非本轮实测，待实车标定复核）：
+ * - counts_per_revolution: 编码器 11PPR*4*30:1=61440，A 轮手测约 61602，B/C/D 未单独实测，
+ *   暂用台架估算 61600（见 app_car.c LEGACY_BENCH_CPR_ESTIMATE 注释）。
+ * - wheel_radius_um: 台架注释 2*pi*32.5mm（app_car.c IK 注释），未实测。
+ * - rotational_lever_um: app_car.c ik_lw=150mm（半轴距+半轮距之和），未实测。
+ * - encoder_direction: 与 app_car.c forward_dir 一致（历史实测的前进方向）。 */
 const wheel_calibration_t car_wheel_calibration = {
-    .counts_per_revolution = {0U, 0U, 0U, 0U},
-    .wheel_radius_um = 0U,
-    .rotational_lever_um = 0U,
-    .encoder_direction = {0, 0, 0, 0},
-    .valid = 0U
+    .counts_per_revolution = {61600U, 61600U, 61600U, 61600U},
+    .wheel_radius_um = 32500U,
+    .rotational_lever_um = 150000U,
+    .encoder_direction = {1, -1, -1, 1},
+    .valid = 1U
 };
 
 static int64_t clamp_i64(int64_t value, int64_t minimum, int64_t maximum)

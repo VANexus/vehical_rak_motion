@@ -194,9 +194,9 @@ static void clear_arm_command(serial_v2_session_state_t *state)
 
 static int all_drive_prerequisites_ready(const serial_v2_session_state_t *state)
 {
+    /* [AI] R34: mask==0x0F 不再作为 ARM 前置——未初始化轮由 ISR 开环 kick
+     * 学习极性（vmask 随学习进度上升到 0x0F）；保留 IMU/标定/采样时间前置。 */
     return state->imu_ready != 0U && state->calibration_ready != 0U &&
-           state->feedback_fresh != 0U &&
-           state->drive_feedback_valid_mask == 0x0FU &&
            state->sample_time_us != 0U;
 }
 
@@ -591,8 +591,9 @@ void serial_v2_session_set_drive_feedback(
     state->drive_feedback_valid_mask =
         (uint8_t)(feedback->feedback_valid_mask & 0x0FU);
     state->encoder_epoch = feedback->encoder_epoch;
-    state->sample_time_us = state->drive_feedback_valid_mask != 0U
-        ? feedback->sample_time_us : 0U;
+    /* [AI] R35: 采样时间戳不再依赖 mask——mask=0（极性未学习）时清零时间戳
+     * 会让 ARM 前置永远不满足，形成"不动→学不了→不动"死锁（R34 联测实测） */
+    state->sample_time_us = feedback->sample_time_us;
     for (unsigned i = 0U; i < 4U; ++i) {
         if ((state->drive_feedback_valid_mask & (1U << i)) != 0U) {
             state->wheel_position_urad[i] = feedback->wheel_position_urad[i];
@@ -602,11 +603,12 @@ void serial_v2_session_set_drive_feedback(
             state->wheel_velocity_urad_s[i] = 0;
         }
     }
-    if (state->drive_armed &&
-        (state->drive_feedback_valid_mask != 0x0FU ||
-         state->sample_time_us == 0U)) {
-        clear_drive_command(state);
+    if (state->drive_armed && state->sample_time_us == 0U) {
+        /* [AI] R36: 只有采样时间戳缺失才算反馈失效；mask<0x0F 是极性学习期
+         * 的正常状态（未初始化轮由 ISR kick 学习），不得据此撤销 ARM */
         state->fault_bitmap |= V2_WHEEL_FAULT;
+        state->drive_rearm_confirmation_required = 1U;
+        state->drive_armed = 0U;
     }
 }
 

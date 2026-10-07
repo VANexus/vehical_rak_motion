@@ -139,7 +139,14 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
   (void)argument;   /* [AI]  未使用（其余四个任务同款写法），-Wextra 要求显式 */
-  /* [AI] PC6 自检保留为 servo_sweep_test() 诊断 API，不在启动任务中触发。 */
+  /* [AI] R30 零位检查（装臂后首次测试）：5 路角度舵机输出 0°（500µs）保持；
+     ch2=PC8=J4 小臂自旋经 R29 实测为 360° 连续旋转舵机（脉宽=速度，1500µs=停转），
+     故保持 1500µs 停转，不再输出 0°。
+     ⚠️ 角度舵机若机械 0 位无行程会顶限位堵转（嗡响/发烫）——立即断电。 */
+  for (unsigned ch = 0; ch < 6U; ++ch) {
+    servo_set_angle(ch, 0);
+  }
+  servo_set_pulse(2U, 1500U);   /* [AI] J4 连续旋转舵机：中位=停转 */
   for(;;)
   {
     osDelay(1000);
