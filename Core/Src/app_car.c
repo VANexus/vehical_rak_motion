@@ -1,4 +1,5 @@
 #include "app_car.h"
+#include "app_sign_store.h"
 #include "app_imu.h"
 #include "app_car_safety.h"
 #include "main.h"
@@ -101,6 +102,8 @@ static TIM_TypeDef *const enc_tim[MOTOR_COUNT] = {TIM2, TIM3, TIM4, TIM5};
 static volatile int32_t position_counts[MOTOR_COUNT];  /* ISR-owned */
 static uint32_t previous_count[MOTOR_COUNT];           /* ISR-owned */
 static volatile int8_t encoder_sign[MOTOR_COUNT];
+/* [AI] R38: 预载极性被矛盾自检纠正时置位，触发重新落盘（任务态读写） */
+static volatile uint8_t sign_store_dirty;
 static volatile int32_t duty_q[MOTOR_COUNT];           /* 0.01 %, ISR PI state */
 static struct motor_state motors[MOTOR_COUNT];
 /* 25 kHz control ISR state */
@@ -129,7 +132,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R37";   /* [AI] R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
+const char build_tag[] = "R38";   /* [AI] R38: encoder_sign kick 学习结果持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -725,12 +728,40 @@ void car_control_step(uint32_t now)
      * [AI] R33: 改用 1 ms 窗增量判向（阈值 20 counts/ms ≈ 2 rad/s）。
      * 旧逻辑用位置累计 |raw|≥100：上电后编码器输入漂移/噪声缓慢累计即可
      * 误触发，学到随机极性 → 闭环正反馈飞车（实测 A/D 轮 27 rad/s 飞车）。
-     * 窗增量阈值只有真实 kick 转速才够得到；kick 自身 75% 占空比远超阈值。 */
+     * 窗增量阈值只有真实 kick 转速才够得到；kick 自身 75% 占空比远超阈值。
+     * [AI] R38: 极性来源优先 Flash 预载（car_init）；本循环另做矛盾自检——
+     * 强正向驱动(duty>40%)时 raw 增量极性若与预载极性相反（换线/预载坏），
+     * 立即纠正并重新落盘，防止 R30 式正反馈飞车在预载路径复活。 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         if (encoder_sign[i] == 0 && (win_raw[i] >= 20 || win_raw[i] <= -20)) {
             encoder_sign[i] = win_raw[i] > 0 ? 1 : -1;
             duty_q[i] = 5000;             /* PI hand-off duty */
             v_ramp[i] = wheel_speed[i];   /* hand off at the kick speed */
+        } else if (encoder_sign[i] != 0 && duty_q[i] > (int32_t)4000U &&
+                   (win_raw[i] >= 20 || win_raw[i] <= -20) &&
+                   ((win_raw[i] > 0 ? 1 : -1) != encoder_sign[i])) {
+            encoder_sign[i] = (int8_t)(-encoder_sign[i]);   /* 预载极性错：翻转 */
+            sign_store_dirty = 1U;
+        }
+    }
+    /* [AI] R38: 四轮极性齐且"本次开机尚未落盘/有纠正" → 追加一条记录
+     * （append-only，见 app_sign_store.c）。失败不重试（避免每 10ms 撞
+     * Flash），下次上电 kick 自检兜底。 */
+    {
+        static uint8_t store_pending;   /* 0=未存 1=已存 */
+        uint8_t need_store = sign_store_dirty;
+        int8_t snapshot_signs[MOTOR_COUNT];
+        uint8_t all_learned = 1U;
+        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+            snapshot_signs[i] = encoder_sign[i];
+            all_learned = (uint8_t)(all_learned && snapshot_signs[i] != 0);
+        }
+        if (all_learned && (need_store != 0U || store_pending == 0U)) {
+            dbg_sign_save_ret = (uint8_t)sign_store_save(snapshot_signs);
+            if (dbg_sign_save_ret == 0U) {
+                sign_store_dirty = 0U;
+            }
+            store_pending = 1U;   /* 无论成败，本开机不再尝试 */
         }
     }
 
@@ -864,6 +895,17 @@ void car_init(void)
     encoder_epoch = 1U;   /* [AI] R22: 上电纪元从 1 起(0 留给"未初始化") */
     /* [AI] R31: 不再用标定表预设 encoder_sign（car_encoder_reset 内注释），
      * 保留 kick 自检：ARMED 首驱 kick 一拍→观测 raw 极性→闭环保守接管 */
+    /* [AI] R38: Flash 扇区满则先擦（此刻 25kHz 未启动、电机未驱动，整片擦
+     * ~1-2s 总线停顿安全）；有历史记录则直接预载极性，跳过上电 kick 跳拍。
+     * 预载错的防线在 car_control_step 的矛盾自检（强正向驱动极性反转即纠正）。 */
+    if (sign_store_prepare() == 0U) {
+        int8_t stored_signs[MOTOR_COUNT];
+        if (sign_store_load(stored_signs) != 0U) {
+            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+                encoder_sign[i] = stored_signs[i];
+            }
+        }
+    }
     /* Debugger halts must not starve the watchdog. */
     DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP;
 
