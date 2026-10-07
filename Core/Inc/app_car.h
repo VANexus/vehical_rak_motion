@@ -2,6 +2,9 @@
 #define APP_CAR_H
 
 #include <stdint.h>
+#include "app_wheel_control.h"
+
+#define CAR_BATTERY_UV_THRESHOLD_MV 10500U
 
 /* Four-wheel chassis application layer.
    - 25 kHz closed loop: TIM6 ISR does encoder accounting, target slew and
@@ -25,11 +28,23 @@ void car_control_isr(void);
 uint32_t car_battery_mv(void);
 uint8_t car_enable_switch(void);
 uint8_t car_mode(void);
+uint8_t car_estop_clear_allowed(void);
 
-/* CAN command inputs (Task_CAN_Rx) */
-void car_can_velocity(int32_t vx_mmps, int32_t vy_mmps, int32_t wz_crads,
-                      uint8_t enable, uint32_t now);
-void car_can_control(uint8_t cmd, uint32_t now);   /* [AI]  v3 SAFETY_CMD 码 */
+/* [AI] R22: USB v2 轮级直通(前左/前右/后左/后右 urad/s),绕过 body IK;
+   内部换算 counts/ms 并钳位。enable=0 即零目标+松链接(deadman)。 */
+#define CAR_MOTOR_COUNT WHEEL_COUNT
+uint8_t car_wheel_calibration_ready(void);
+void car_wheel_command_urad(const int32_t wheel_urad_s[CAR_MOTOR_COUNT],
+                            uint8_t enable, uint32_t now);
+uint8_t car_estop_clear(void);          /* [AI] 仅清锁成功返回非零；由 USB v2 DRIVE clear 调用 */
+uint64_t car_uptime_us(uint32_t tick_ms);
+/* [AI] R22: 编码器一致采样快照(DRIVE_STATE 组包用):归一化位置 urad、
+   速度 urad/s、valid mask(encoder_sign 已标定)、epoch、采样时刻 µs。 */
+void car_encoder_snapshot(int64_t pos_urad[CAR_MOTOR_COUNT],
+                          int32_t vel_urad_s[CAR_MOTOR_COUNT],
+                          uint8_t *valid_mask, uint32_t *epoch,
+                          uint64_t *sample_us);
+/* [AI] CAN 急停与已校验的 USB v2 DRIVE LATCH 共用此 25 kHz 快速锁存请求。 */
 void car_estop_request_fast(void);                 /* [AI]  CAN 中断急停快速路径 */
 
 /* Telemetry outputs (Task_CAN_Tx) */

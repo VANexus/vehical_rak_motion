@@ -1,5 +1,6 @@
 #include "app_car.h"
 #include "app_imu.h"
+#include "app_car_safety.h"
 #include "main.h"
 #include "tim.h"
 #include "adc.h"
@@ -16,14 +17,15 @@
 
 /* Quadrature counts per output-shaft revolution: MG513P30, 512 lines
    *4 quadrature *30:1 = 61440; 61600 is the hand-measured value. */
-#define ENCODER_COUNTS_PER_REV 61600L
+/* [AI] R23：历史 61600 不是四轮实测值；仅 A 轮约 61602 有手测记录，B/C/D 未测。此估算只供旧台架转数路径，v2 不读取。 */
+#define LEGACY_BENCH_CPR_ESTIMATE 61600L
 #define PWM_HZ 25000U
 #define MAX_DUTY_PERCENT 85U
 #define MOTOR_TIMEOUT_MS 90000U
 #define STALL_TIMEOUT_MS 2500U
-#define POSITION_TOLERANCE (ENCODER_COUNTS_PER_REV / 200L)
-#define SHORT_ACCEPT       (ENCODER_COUNTS_PER_REV / 100L)  /* 3.00 +-0.01 band */
-#define OVERSHOOT_LIMIT    (ENCODER_COUNTS_PER_REV / 8L)   /* gross overshoot -> FAULT */
+#define POSITION_TOLERANCE (LEGACY_BENCH_CPR_ESTIMATE / 200L)
+#define SHORT_ACCEPT       (LEGACY_BENCH_CPR_ESTIMATE / 100L)  /* 3.00 +-0.01 band */
+#define OVERSHOOT_LIMIT    (LEGACY_BENCH_CPR_ESTIMATE / 8L)   /* gross overshoot -> FAULT */
 
 /* 25 kHz closed loop (design: PID interrupt, fixed point, no float).
    The timer ISR samples the encoders every 40 us, accumulates a 1 ms
@@ -53,6 +55,7 @@
       v_i = sx*Vx + sy*Vy + sw*(lx+ly)*wz   [mm/s, wz in 0.01 rad/s]
    converted with counts/ms = mm/s * 61600 / (2*pi*32.5 mm) / 1000.
    If a wheel runs the wrong way during test, flip its sign(s) here. */
+/* [AI] R23：以下麦轮估算常数仅保留旧 CAN/台架路径，不作为 v2 标定数据。 */
 #define IK_PERMM_NUM  3017L   /* counts per mm, x10 */
 #define IK_PERMM_DEN 10000L
 
@@ -69,7 +72,7 @@
 #define SLIP_SCALE_STEP    2U
 #define SLIP_RECOVER_STEP  4U
 
-enum { MOTOR_COUNT = 4 };
+enum { MOTOR_COUNT = WHEEL_COUNT };
 enum run_mode { IDLE, RUNNING, DONE, STOPPED, FAULT, CALIBRATING, CALIB_DONE };
 enum motor_phase { MOTOR_DRIVE, MOTOR_BRAKE, MOTOR_DONE };
 
@@ -106,14 +109,17 @@ static volatile uint32_t win_cnt;
 static volatile int32_t wheel_speed[MOTOR_COUNT];      /* counts/ms, signed */
 static volatile int32_t v_cmd[MOTOR_COUNT];            /* counts/ms, supervisor */
 static int32_t v_ramp[MOTOR_COUNT];                    /* ISR slew-limited target */
-/* CAN command state (supervisor consumes, Task_CAN_Rx writes) */
-static volatile int32_t cmd_vx_mmps, cmd_vy_mmps, cmd_wz_crads;
-static volatile uint8_t cmd_enable;
+/* [AI] USB v2 四轮目标通过双槽快照发布，控制任务只读完整帧。 */
+static wheel_target_mailbox_t wheel_command_mailbox;
+static volatile uint32_t encoder_epoch;   /* [AI] R22: 编码器累计位置纪元,复位即递增 */
+static atomic_uint_least32_t encoder_generation;
+static wheel_uptime_clock_t uptime_clock;
+static uint64_t car_uptime_us_locked(uint32_t tick_ms);
 static volatile uint8_t estop_latched;
 static volatile uint8_t car_estop_fast_req;   /* [AI]  CAN 中断置位, 25kHz ISR 执行急停 */
-static volatile uint32_t last_jetson_ms;
 static volatile int32_t meas_vx_mmps, meas_vy_mmps, meas_wz_crads;
 static uint8_t remote_running;
+static uint8_t estop_button_release_required;
 static volatile enum run_mode mode = IDLE;
 static volatile unsigned active_motor;
 volatile uint32_t motor_command;   /* SWD/CAN mailbox: 1=run 2=stop 3=cal */
@@ -122,7 +128,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R21";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
+const char build_tag[] = "R28";   /* [AI] R20: CubeMX 全量迁移版——外设初始化交 HAL/MX_*_Init,应用层只留逻辑;25kHz ISR 函数体保持寄存器级,经 TIM6_DAC_IRQHandler USER CODE 挂载 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -280,12 +286,18 @@ static inline void isr_state_unlock(void)
 
 static void reset_positions(void)
 {
+    uint8_t calibrated =
+        (uint8_t)wheel_control_calibration_valid(&car_wheel_calibration);
+    taskENTER_CRITICAL();
+    wheel_control_encoder_generation_write_begin(&encoder_generation);
     isr_state_lock();
+    encoder_epoch++;   /* [AI] R22: 位置清零即换纪元,host 侧据此丢弃旧累计位 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         enc_tim[i]->CNT = 0;
         previous_count[i] = 0;
         position_counts[i] = 0;
-        encoder_sign[i] = 0;
+        encoder_sign[i] = calibrated != 0U
+            ? car_wheel_calibration.encoder_direction[i] : 0;
         duty_q[i] = 0;
         v_ramp[i] = 0;
         v_cmd[i] = 0;
@@ -293,7 +305,9 @@ static void reset_positions(void)
         win_sum[i] = 0;
         motors[i].phase = MOTOR_BRAKE;
     }
+    wheel_control_encoder_generation_write_end(&encoder_generation);
     isr_state_unlock();
+    taskEXIT_CRITICAL();
 }
 
 /* [AI]  立即停：四路刹车 + 目标清零（台架/遥控/急停多处复用） */
@@ -421,7 +435,7 @@ static void control_bench(uint32_t now)
         if (m->phase == MOTOR_BRAKE) {
             if ((uint32_t)(now - m->brake_started_ms) < 300U) continue;
             int32_t position = raw * encoder_sign[i];
-            int32_t error = (int32_t)(target_turns[i] * ENCODER_COUNTS_PER_REV) - position;
+            int32_t error = (int32_t)(target_turns[i] * LEGACY_BENCH_CPR_ESTIMATE) - position;
             int32_t speed = wheel_speed[i];
             /* Overshoot past target: never reverse into it.  A small
                excess is accepted as done; only gross overshoot faults. */
@@ -455,7 +469,7 @@ static void control_bench(uint32_t now)
         if (encoder_sign[i] == 0) continue;   /* ISR kicks open loop */
         if (wheel_speed[i] >= 1 || wheel_speed[i] <= -1) m->last_motion_ms = now;
         int32_t position = raw * encoder_sign[i];
-        int32_t error = (int32_t)(target_turns[i] * ENCODER_COUNTS_PER_REV) - position;
+        int32_t error = (int32_t)(target_turns[i] * LEGACY_BENCH_CPR_ESTIMATE) - position;
         /* Fixed brake distance once the approach has settled.  A
            correction stint must actually move ~300 counts before it may
            brake, otherwise it would sit at the trigger and exhaust. */
@@ -470,7 +484,7 @@ static void control_bench(uint32_t now)
             continue;
         }
         /* Slower inside the last 1/4 turn; the ISR PI does the rest. */
-        v_cmd[i] = (error > ENCODER_COUNTS_PER_REV / 4L) ? BENCH_CRUISE
+        v_cmd[i] = (error > LEGACY_BENCH_CPR_ESTIMATE / 4L) ? BENCH_CRUISE
                                                          : BENCH_APPROACH;
     }
     if (finished == MOTOR_COUNT) {
@@ -484,6 +498,8 @@ static void control_bench(uint32_t now)
    1) 有旋转指令：按速率误差(指令-实测)加修正；2) 无旋转指令：阻尼+航向保持；
    3) 打滑判定：轮速推算偏航率 vs 陀螺仪差 > 阈值持续 300ms → 平移分量降额，
       恢复后逐步放行。仅驱动路径生效；IMU 不在线时纯直通。 */
+/* [AI] R23：旧 body wz 注入与航向保持仅留作历史记录，活动稳定器只改四轮目标。 */
+#if 0
 static float wrap180(float e)
 {
     while (e > 180.0f) e -= 360.0f;
@@ -539,19 +555,105 @@ static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
         dbg_stab_scale = stab_scale;
     }
 }
+#endif
+
+/* [AI] R22：关闭 body 指令域修正；新补偿只在四轮目标生成后运行。 */
+static void stabilizer_apply(int32_t *vx, int32_t *vy, int32_t *wz)
+{
+    (void)vx;
+    (void)vy;
+    (void)wz;
+    stab_scale = 256U;
+    stab_slip_ms = 0U;
+    dbg_stab_corr = 0;
+    dbg_stab_scale = 256U;
+    dbg_slip = 0U;
+}
+
+static int32_t wheel_target_limit_urad_s(void)
+{
+    uint32_t max_cpr = 0U;
+    if (!wheel_control_calibration_valid(&car_wheel_calibration))
+        return 0;
+    for (unsigned i = 0U; i < MOTOR_COUNT; ++i) {
+        if (car_wheel_calibration.counts_per_revolution[i] > max_cpr)
+            max_cpr = car_wheel_calibration.counts_per_revolution[i];
+    }
+    if (max_cpr == 0U)
+        return 0;
+    int64_t limit = (int64_t)V_CMD_LIMIT * WHEEL_URAD_PER_REV * 1000LL /
+                    max_cpr;
+    return limit > INT32_MAX ? INT32_MAX : (int32_t)limit;
+}
+
+static int wheel_stabilize_targets(int32_t target_urad_s[MOTOR_COUNT],
+                                   const int32_t measured_urad_s[MOTOR_COUNT],
+                                   int32_t imu_yaw_rate_mrad_s)
+{
+    int32_t corrections[MOTOR_COUNT];
+    if (!wheel_control_stabilize(
+            target_urad_s, measured_urad_s, imu_yaw_rate_mrad_s,
+            &car_wheel_calibration, 100000U, 100U, corrections))
+        return 0;
+    if (!wheel_control_common_saturate(
+            target_urad_s, wheel_target_limit_urad_s()))
+        return 0;
+
+    dbg_stab_corr = corrections[0] / 10000;
+    dbg_stab_scale = 256U;
+    dbg_slip = (uint8_t)(corrections[0] != 0 || corrections[1] != 0 ||
+                         corrections[2] != 0 || corrections[3] != 0);
+    return 1;
+}
 
 /* [AI] R14: 遥控与麦轮自检共用的驱动下发路径（稳定器修正 → IK → 四路目标） */
+/* [AI] R23：上方为历史说明；当前稳定修正位于 IK 后，只作用四轮目标域。 */
 static void drive_apply(int32_t vx, int32_t vy, int32_t wz)
 {
     stabilizer_apply(&vx, &vy, &wz);
+    int32_t target_counts_ms[MOTOR_COUNT];
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         motors[i].phase = MOTOR_DRIVE;
-        v_cmd[i] = ik_wheel_target(i, vx, vy, wz);
+        target_counts_ms[i] = ik_wheel_target(i, vx, vy, wz);
     }
+    if (car_wheel_calibration_ready() != 0U &&
+        imu_sample_fresh(HAL_GetTick())) {
+        int64_t position[MOTOR_COUNT];
+        int32_t measured[MOTOR_COUNT];
+        int32_t target_urad_s[MOTOR_COUNT];
+        uint8_t valid_mask;
+        uint32_t epoch;
+        uint64_t sample_us;
+        car_encoder_snapshot(position, measured, &valid_mask, &epoch,
+                             &sample_us);
+        (void)position;
+        (void)epoch;
+        if (valid_mask == 0x0FU &&
+            wheel_control_sample_fresh_from_clock(
+                HAL_GetTick, (uint32_t)(sample_us / 1000ULL),
+                (uint8_t)(sample_us != 0U)) &&
+            wheel_control_normalized_counts_to_urad_s(
+                target_counts_ms, &car_wheel_calibration, target_urad_s) &&
+            wheel_stabilize_targets(
+                target_urad_s, measured,
+                (int32_t)(imu_yaw_rate_dps() * 17.453293f)) &&
+            wheel_control_command_to_counts(
+                target_urad_s, &car_wheel_calibration,
+                target_counts_ms) != 0U) {
+            for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+                v_cmd[i] = target_counts_ms[i];
+            return;
+        }
+    }
+    for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+        v_cmd[i] = target_counts_ms[i];
 }
 
 void car_control_step(uint32_t now)
 {
+    wheel_target_snapshot_t wheel_command = {0};
+    uint8_t wheel_command_valid =
+        wheel_target_mailbox_read(&wheel_command_mailbox, &wheel_command);
     motor_vbat_mv = battery_read_mv();          /* [AI]  100Hz 采样(原在显示层) */
     enable_switch = (int8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) == GPIO_PIN_SET);
 
@@ -564,9 +666,28 @@ void car_control_step(uint32_t now)
         imu_update(now, still);
     }
 
+    uint8_t controls_allowed =
+        car_control_inputs_allowed(estop_latched, car_estop_fast_req);
     /* operator inputs: short press = bench run start/stop, long press =
        mecanum motion self-test start/stop */
     int bev = button_pressed_event(now);
+    if (controls_allowed == 0U) {
+        motor_command = 0U;
+        estop_button_release_required =
+            (uint8_t)(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);
+        brake_all();
+        remote_running = 0U;
+        mt_running = 0U;
+        mt_stop_req = 0U;
+        if (mode != FAULT) mode = STOPPED;
+        return;
+    }
+    if (estop_button_release_required != 0U) {
+        bev = 0;
+        if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_SET)
+            estop_button_release_required = 0U;
+    }
+
     if (bev == 1) {
         if (mt_running != 0U) {
             mt_stop_req = 1U;
@@ -632,8 +753,12 @@ void car_control_step(uint32_t now)
 
     /* remote (Jetson) velocity mode */
     {
-        uint32_t age = now - last_jetson_ms;
-        int link = (last_jetson_ms != 0U) && (age <= RC_TIMEOUT_MS);
+        uint32_t command_ms = wheel_command.command_tick;
+        uint32_t link_now = HAL_GetTick();
+        int32_t age = (int32_t)(link_now - command_ms);
+        int link = wheel_command_valid != 0U &&
+                   wheel_command.source == 1U && command_ms != 0U && age >= 0 &&
+                   (uint32_t)age <= RC_TIMEOUT_MS;
         int bench_busy = (mode == RUNNING || mode == CALIBRATING ||
                           mt_running != 0U);
         if (estop_latched != 0U) {
@@ -648,10 +773,15 @@ void car_control_step(uint32_t now)
                 mode = STOPPED;
             }
         } else if (!bench_busy && mode != FAULT) {
-            if (link && cmd_enable != 0U) {
-                int32_t vx = cmd_vx_mmps, vy = cmd_vy_mmps, wz = cmd_wz_crads;
-                if (remote_running == 0U) imu_zero_yaw();   /* [AI]  R9: 进入遥控以当前航向为参考 */
-                drive_apply(vx, vy, wz);                    /* [AI]  R9: 陀螺仪自稳定 */
+            if (link && wheel_command.enabled != 0U &&
+                wheel_command.source == 1U) {
+                /* [AI] R22: USB v2 轮级直通 —— 目标已换算为 counts/ms,无
+                   body-wz 前置注入、无零偏航航向保持(IMU 补偿迁到轮目标域
+                   需单独台架验证,验证前补偿为零)。钳位在命令入口已做。 */
+                for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+                    motors[i].phase = MOTOR_DRIVE;
+                    v_cmd[i] = wheel_command.target_counts_ms[i];
+                }
                 remote_running = 1;
             } else if (remote_running != 0U) {
                 /* deadman / enable dropped: decelerate, then stop */
@@ -690,6 +820,24 @@ void car_control_step(uint32_t now)
    本层只负责首拍启动。 */
 
 /* ---- public interface ---- */
+static void publish_wheel_command(const int32_t target_counts_ms[MOTOR_COUNT],
+                                  uint8_t source, uint8_t enabled,
+                                  uint32_t now)
+{
+    wheel_target_snapshot_t snapshot = {
+        .command_tick = now,
+        .source = source,
+        .enabled = enabled
+    };
+    for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+        snapshot.target_counts_ms[i] =
+            target_counts_ms != NULL ? target_counts_ms[i] : 0;
+
+    taskENTER_CRITICAL();
+    wheel_target_mailbox_publish(&wheel_command_mailbox, &snapshot);
+    taskEXIT_CRITICAL();
+}
+
 void car_init(void)
 {
     /* [AI] R20 CubeMX 迁移：原时钟兜底(HSI→HSE 168MHz)已删——
@@ -704,6 +852,14 @@ void car_init(void)
         else if (csr & RCC_CSR_PORRSTF) reset_cause = (uint8_t)'P';
         else reset_cause = (uint8_t)'-';
         RCC->CSR |= RCC_CSR_RMVF;
+    }
+    wheel_target_mailbox_init(&wheel_command_mailbox);
+    atomic_store_explicit(&encoder_generation, 0U, memory_order_relaxed);
+    uptime_clock = (wheel_uptime_clock_t){0};
+    encoder_epoch = 1U;   /* [AI] R22: 上电纪元从 1 起(0 留给"未初始化") */
+    if (car_wheel_calibration_ready() != 0U) {
+        for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+            encoder_sign[i] = car_wheel_calibration.encoder_direction[i];
     }
     /* Debugger halts must not starve the watchdog. */
     DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP;
@@ -750,47 +906,173 @@ void car_feed_watchdog(void)
 uint32_t car_battery_mv(void) { return motor_vbat_mv; }
 uint8_t car_enable_switch(void) { return (uint8_t)enable_switch; }
 uint8_t car_mode(void) { return (uint8_t)mode; }
-
-/* ---- CAN command inputs (called by Task_CAN_Rx) ---- */
-void car_can_velocity(int32_t vx_mmps, int32_t vy_mmps, int32_t wz_crads,
-                      uint8_t enable, uint32_t now)
+uint8_t car_estop_clear_allowed(void)
 {
-    /* [AI]  入口钳位，见 V_CMD_MAX_MMPS 注释：防下游 int32 溢出(UB) */
-    if (vx_mmps >  V_CMD_MAX_MMPS)  vx_mmps =  V_CMD_MAX_MMPS;
-    if (vx_mmps < -V_CMD_MAX_MMPS)  vx_mmps = -V_CMD_MAX_MMPS;
-    if (vy_mmps >  V_CMD_MAX_MMPS)  vy_mmps =  V_CMD_MAX_MMPS;
-    if (vy_mmps < -V_CMD_MAX_MMPS)  vy_mmps = -V_CMD_MAX_MMPS;
-    if (wz_crads >  W_CMD_MAX_CRADS) wz_crads =  W_CMD_MAX_CRADS;
-    if (wz_crads < -W_CMD_MAX_CRADS) wz_crads = -W_CMD_MAX_CRADS;
-
-    cmd_vx_mmps = vx_mmps;
-    cmd_vy_mmps = vy_mmps;
-    cmd_wz_crads = wz_crads;
-    cmd_enable = enable;
-    last_jetson_ms = now;
+    return car_safety_clear_allowed(
+        (uint8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) == GPIO_PIN_RESET),
+        (uint8_t)(mode != FAULT &&
+                  motor_vbat_mv >= CAR_BATTERY_UV_THRESHOLD_MV),
+        car_estop_fast_req);
+}
+uint8_t car_wheel_calibration_ready(void)
+{
+    return (uint8_t)wheel_control_calibration_valid(&car_wheel_calibration);
 }
 
-void car_can_control(uint8_t cmd, uint32_t now)
+/* [AI] R22: USB v2 轮级直通命令入口(serial 层任务上下文调用)。
+   四轮 rad/s(urad/s) → counts/ms 定点换算,入口钳位 V_CMD_LIMIT;
+   不做 body-twist IK、不动 stabilizer。顺序 = 前左/前右/后左/后右
+   (v2 合同固定),与电机序号 0..3 = FL/FR/RL/RR 一致(ik_sy/ik_sw 布局)。 */
+/* [AI] R23：本函数应用轮域稳定补偿；上方 R22 注释中的“不动 stabilizer”已被本说明取代。 */
+/* [AI] Task 3：实际换算只读 car_wheel_calibration；默认未签核时强制清零并闭锁。 */
+void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
+                            uint8_t enable, uint32_t now)
 {
-    /* [AI]  CAN v3 SAFETY_CMD 码（§7.1）: 1=START 2=STOP 4=EMERGENCY_STOP
-       5=CLEAR_ESTOP 6=CLEAR_FAULT（4 亦可经 car_estop_request_fast） */
-    switch (cmd & 0x0FU) {
-    case 1U: break;                            /* [AI]  START: 使能位允许即动 */
-    case 2U:
-        brake_all();
-        mode = STOPPED;
-        break;
-    case 4U: estop_latched = 1U; break;
-    case 5U: estop_latched = 0U; break;        /* CLEAR_ESTOP */
-    case 6U: if (mode == FAULT) mode = IDLE; break;
-    default: break;
+    int32_t target_urad_s[MOTOR_COUNT] = {0};
+    int32_t target_counts_ms[MOTOR_COUNT] = {0};
+    int64_t position_urad[MOTOR_COUNT];
+    int32_t measured_urad_s[MOTOR_COUNT];
+    uint8_t valid_mask = 0U;
+    uint32_t epoch;
+    uint64_t sample_us;
+
+    enable = (uint8_t)(enable != 0U && wheel_urad_s != NULL &&
+                       car_wheel_calibration_ready() != 0U &&
+                       imu_sample_fresh(now) != 0);
+    if (enable != 0U) {
+        car_encoder_snapshot(position_urad, measured_urad_s, &valid_mask,
+                             &epoch, &sample_us);
+        (void)epoch;
+        enable = (uint8_t)(valid_mask == 0x0FU &&
+            wheel_control_sample_fresh_from_clock(
+                HAL_GetTick, (uint32_t)(sample_us / 1000ULL),
+                (uint8_t)(sample_us != 0U)));
     }
-    last_jetson_ms = now;
+    if (enable != 0U) {
+        for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+            target_urad_s[i] = wheel_urad_s[i];
+        enable = (uint8_t)(wheel_stabilize_targets(
+            target_urad_s, measured_urad_s,
+            (int32_t)(imu_yaw_rate_dps() * 17.453293f)) &&
+            wheel_control_command_to_counts(
+                target_urad_s, &car_wheel_calibration, target_counts_ms));
+    }
+    if (enable == 0U) {
+        for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
+            target_counts_ms[i] = 0;
+    }
+
+    publish_wheel_command(target_counts_ms, 1U, enable, now);
+}
+
+static uint64_t car_uptime_us_locked(uint32_t tick_ms)
+{
+    return wheel_control_uptime_us(&uptime_clock, tick_ms);
+}
+
+uint64_t car_uptime_us(uint32_t tick_ms)
+{
+    uint64_t uptime_us;
+    taskENTER_CRITICAL();
+    uptime_us = car_uptime_us_locked(tick_ms);
+    taskEXIT_CRITICAL();
+    return uptime_us;
+}
+
+/* [AI] R22: 编码器一致采样快照(serial 层 100Hz 组 DRIVE_STATE 用)。
+   isr_state_lock 临界区内取位置/速度同拍快照;位置经 encoder_sign 归一
+   (正=标定前进方向)后换算微弧度;速度 counts/ms → urad/s。
+   valid_mask=1 表示该轮 encoder_sign 已标定;未标定轮不伪装有效。 */
+void car_encoder_snapshot(int64_t pos_urad[MOTOR_COUNT],
+                          int32_t vel_urad_s[MOTOR_COUNT],
+                          uint8_t *valid_mask, uint32_t *epoch,
+                          uint64_t *sample_us)
+{
+    int32_t raw_pos[MOTOR_COUNT], raw_spd[MOTOR_COUNT];
+    int8_t signs[MOTOR_COUNT];
+    uint8_t sampled_mask = 0U;
+    uint32_t snapshot_epoch;
+    uint64_t snapshot_sample_us;
+
+    for (;;) {
+        uint32_t generation_before = atomic_load_explicit(
+            &encoder_generation, memory_order_acquire);
+        if ((generation_before & 1U) != 0U)
+            continue;
+
+        sampled_mask = 0U;
+        taskENTER_CRITICAL();
+        uint32_t generation_locked = atomic_load_explicit(
+            &encoder_generation, memory_order_acquire);
+        if (generation_locked != generation_before ||
+            (generation_locked & 1U) != 0U) {
+            taskEXIT_CRITICAL();
+            continue;
+        }
+        isr_state_lock();
+        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+            raw_pos[i] = position_counts[i];
+            signs[i] = encoder_sign[i];
+            if (signs[i] != 0) {
+                raw_spd[i] = wheel_speed[i];
+                sampled_mask |= (uint8_t)(1U << i);
+            } else {
+                raw_spd[i] = 0;
+            }
+        }
+        snapshot_epoch = encoder_epoch;
+        snapshot_sample_us = car_uptime_us_locked(HAL_GetTick());
+        isr_state_unlock();
+        taskEXIT_CRITICAL();
+
+        uint32_t generation_after = atomic_load_explicit(
+            &encoder_generation, memory_order_acquire);
+        if (wheel_control_encoder_generation_stable(
+                generation_before, generation_after))
+            break;
+    }
+
+    (void)wheel_control_encoder_state(
+        raw_pos, raw_spd, sampled_mask, &car_wheel_calibration,
+        pos_urad, vel_urad_s, valid_mask);
+    *epoch = snapshot_epoch;
+    *sample_us = snapshot_sample_us;
 }
 
 void car_estop_request_fast(void)
 {
     car_estop_fast_req = 1U;   /* [AI]  CAN 中断调用: 25kHz ISR 执行刹车 */
+}
+
+uint8_t car_estop_clear(void)
+{
+    int32_t zero_target[MOTOR_COUNT] = {0};
+    uint8_t calibrating = (uint8_t)(mode == CALIBRATING);
+
+    taskENTER_CRITICAL();
+    isr_state_lock();
+    if (car_safety_clear_allowed(
+            (uint8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) == GPIO_PIN_RESET),
+            (uint8_t)(mode != FAULT &&
+                      motor_vbat_mv >= CAR_BATTERY_UV_THRESHOLD_MV),
+            car_estop_fast_req) == 0U) {
+        isr_state_unlock();
+        taskEXIT_CRITICAL();
+        return 0U;
+    }
+    car_safety_clear_pending(
+        &motor_command, &estop_latched, &remote_running, &mt_running,
+        &mt_stop_req, &calibrating, v_cmd, v_ramp, duty_q, MOTOR_COUNT);
+    if (mode != FAULT) mode = STOPPED;
+    for (unsigned i = 0U; i < MOTOR_COUNT; ++i) {
+        motors[i].phase = MOTOR_BRAKE;
+    }
+    estop_button_release_required =
+        (uint8_t)(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);
+    publish_wheel_command(zero_target, 1U, 0U, HAL_GetTick());
+    isr_state_unlock();
+    taskEXIT_CRITICAL();
+    return 1U;
 }
 
 /* ---- telemetry outputs (called by Task_CAN_Tx) ---- */
@@ -841,7 +1123,13 @@ void car_control_isr(void)
     if (car_estop_fast_req != 0U) {
         car_estop_fast_req = 0U;
         estop_latched = 1U;
+    }
+    if (estop_latched != 0U) {
         brake_all();
+        for (unsigned i = 0U; i < MOTOR_COUNT; ++i) {
+            v_ramp[i] = 0;
+            duty_q[i] = 0;
+        }
     }
 
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
@@ -861,6 +1149,12 @@ void car_control_isr(void)
             win_sum[i] = 0;
             if (encoder_sign[i] == 0) continue;
             wheel_speed[i] = sum * encoder_sign[i];       /* counts/ms */
+            if (estop_latched != 0U) {
+                v_cmd[i] = 0;
+                v_ramp[i] = 0;
+                duty_q[i] = 0;
+                continue;
+            }
             int32_t d = v_cmd[i] - v_ramp[i];
             if (d > SPEED_RAMP_STEP) d = SPEED_RAMP_STEP;
             if (d < -SPEED_RAMP_STEP) d = -SPEED_RAMP_STEP;
@@ -874,25 +1168,20 @@ void car_control_isr(void)
     }
 
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-        if (mode == CALIBRATING) {
-            motor_drive(i, forward_dir[i], 55U);
-            continue;
+        car_motor_output_t output = car_motor_output_gate(
+            estop_latched, (uint8_t)(mode == CALIBRATING),
+            (uint8_t)(motors[i].phase == MOTOR_DRIVE),
+            (uint8_t)(encoder_sign[i] == 0), forward_dir[i], duty_q[i]);
+        if (output.reset_controller != 0U) {
+            v_cmd[i] = 0;
+            v_ramp[i] = 0;
+            duty_q[i] = 0;
         }
-        if (motors[i].phase != MOTOR_DRIVE) {
-            motor_brake(i);               /* hold / stop */
-            continue;
+        if (output.action == CAR_MOTOR_OUTPUT_BRAKE) {
+            motor_brake(i);
+        } else {
+            motor_drive(i, output.direction, output.duty_percent);
         }
-        if (encoder_sign[i] == 0) {
-            /* Simultaneous breakaway: every motor gets the same strong
-               duty from the same instant, so none starts early. */
-            motor_drive(i, forward_dir[i], KICK_DUTY);
-            continue;
-        }
-        /* signed duty: a negative target drives the reverse input */
-        int32_t dq = duty_q[i];
-        int dir = forward_dir[i];
-        if (dq < 0) { dir = -dir; dq = -dq; }
-        motor_drive(i, dir, (unsigned)(dq / 100));
     }
 
     /* [AI]  R19: 占用率统计。注意这里量的是"清 UIF 之后到退出"的跨度，

@@ -34,7 +34,7 @@ compatibility or physical acceptance.
 ## Implemented in this repository
 
 `Core/Inc/app_protocol_v2.h` and `Core/Src/app_protocol_v2.c` contain standalone
-frame/CRC/COBS plus DRIVE_COMMAND and ARM_COMMAND codecs. They are included by
+frame/CRC/COBS and typed codecs for the UART v2 messages. They are included by
 the top-level firmware CMake target. `tools/uart_v2_codec_test.c` is a host
 compiler golden-vector test:
 
@@ -45,34 +45,51 @@ cc -std=c11 -Wall -Wextra -Werror -Wpedantic -ICore/Inc \
 /tmp/uart_v2_codec_test
 ```
 
-The codec is not connected to `app_serial.c`, does not advertise v2 features,
-and cannot actuate wheels or servos. The existing UART endpoint remains v1.
-Do not advertise v2 capability bits or enable host hardware until the full
-endpoint and physical gates below are complete.
+`Core/Inc/app_serial_session.h` and `Core/Src/app_serial_session.c` implement
+the host-testable v2 session: bounded COBS stream framing, HELLO/ACK and
+required-feature negotiation, independent RX/TX sequence spaces, independent
+drive/arm leases, safety/fault handling, typed state/diagnostics/time-sync
+transmission, and bounded per-port TX queues. `tools/uart_v2_session_test.c`
+exercises the runtime with the host compiler.
 
-## Firmware work still required
+`app_serial.c` connects this session to USART1/USART3 circular RX DMA and
+single-frame TX DMA. The active serial path accepts v2 only; the v1 endpoint
+and raw `ID:A` banner are not active. Required feature bits 0/1/2 are
+advertised and negotiated. ARM commands remain commissioning-locked. Drive
+ARM remains closed in this task because wheel calibration and valid fresh
+four-wheel feedback are not yet available; DRIVE_STATE reports a zero validity
+mask and no sample timestamp rather than synthesizing a measurement.
 
-1. Replace the v1-only serial dispatch with bounded v2 stream decoding,
-   sequence validation, strict feature negotiation and independent drive/arm
-   command leases. Invalid input must not refresh either lease.
-2. Route four wheel targets to the 25 kHz loops with one common saturation
-   factor. Remove host-body-twist inverse kinematics from the live control path.
-   Review the current IMU stabilizer: its source currently adjusts body `wz`
-   before inverse kinematics and therefore is not yet the required wheel-only
-   compensation.
-3. Publish encoder position/speed from a consistent sample, maintain encoder
-   epoch, validity and acquisition uptime. Do not report command-derived
-   velocity as measured odometry.
-4. Route six calibrated servo position targets without boot sweep. A seventh
-   PWM channel requires a confirmed pin/timer assignment; do not invent one.
-   Servo command echo must remain distinct from measured joint state.
-5. Implement diagnostic counters, safety commands, physical E-stop latch,
-   startup DISARMED state and arm active-hold behavior. Verify power-loss
-   mechanics independently.
-6. Reconcile CubeMX/board startup behavior and verify Release and Debug with
-   STM32CubeCLT. Then compare host/F407 vectors and perform supervised physical
-   acceptance with wheels clear and arm mechanically supported.
+This is endpoint implementation status, not physical acceptance. Do not
+authorize nonzero wheel or arm commands until the remaining calibration,
+feedback, and supervised hardware gates below are complete.
+
+## Remaining firmware and hardware work
+
+1. Task 3 must provide signed wheel calibration, valid/fresh encoder sampling,
+   wheel-domain IMU compensation, and the approved counts-to-wheel conversion.
+   Until those checks pass, the application deliberately supplies false
+   calibration and feedback readiness to the v2 drive session.
+2. Complete calibrated six-axis arm routing and active-hold behavior only after
+   commissioning approval. The present endpoint parses arm commands and
+   publishes unavailable measured state without driving servo PWM.
+3. Perform supervised physical acceptance with wheels clear and the arm
+   mechanically supported. This implementation has only host tests and
+   Debug/Release cross-build evidence; it has not been tested on hardware.
 
 The Jetson SPI sensor bridge, ros2_control hardware plugin, EKF configuration,
 wheel geometry/calibration, six-axis joint calibration and gripper channel are
 separate gates. A passing codec test does not close any of them.
+
+## 急停清锁约定
+
+C30D 没有独立的外部 E-stop 反馈输入。操作者发送 USB v2 `CLEAR_INHIBIT`
+前，必须亲自确认外部急停按钮/回路已经释放；该命令代表操作者确认，不代表
+固件检测到了外部急停状态。固件另外要求 PD3 本地 enable switch 处于 OFF、
+内部车控故障已清且没有待处理的 CAN 急停请求。CAN clear/START 不清锁、不启动。
+
+清锁事务会丢弃旧电机命令、bench/calibration/run 状态和轮目标/enable，并保持
+DISARMED。清锁本身不恢复运动：host 必须先发送序号晚于 CLEAR 的零值 DISARMED
+DRIVE_COMMAND 确认；确认前到达的任何 ARMED DRIVE_COMMAND 都会被拒绝且不刷新
+drive lease。确认后仍须 IMU、标定、反馈和故障门禁全部就绪，新的 ARMED 命令才可生效。
+该重确认屏障只约束 DRIVE，不改变 ARM 子系统语义。若清锁执行前条件发生变化，车端拒绝清锁并让 USB session 重新保持 inhibit。

@@ -9,6 +9,7 @@
  * 参考：car2/tools/references/smart-transport-robot/01_.../bsp/bsp_c30d.c（已验证套路）
  */
 #include "app_imu.h"
+#include "app_wheel_control.h"
 #include "iwdg.h"
 #include "stm32f4xx.h"
 
@@ -49,6 +50,8 @@ static float    gyro_bias;
 static float    yaw_now;
 static float    rate_dps_now;
 static uint32_t yaw_last_ms;
+static uint32_t last_successful_sample_ms;
+static uint8_t  successful_sample_valid;
 static uint32_t still_t0, still_n;
 static float    still_acc, still_min, still_max;
 
@@ -151,6 +154,9 @@ static void    icm_bank(uint8_t b)   { icm_write(ICM_REG_BANK_SEL, (uint8_t)(b <
 
 void imu_init(void)
 {
+    last_successful_sample_ms = 0U;
+    successful_sample_valid = 0U;
+
     /* [AI] R20 CubeMX 迁移：PB10/PB11 已由 MX_GPIO_Init 配置为开漏输出
        （gpio.c, OUTPUT_OD）；总线空闲电平靠外部 10k 上拉（板上有,见文件头），
        不再内置 GPIO 上拉——与 CubeMX 配置单点一致。 */
@@ -237,10 +243,11 @@ void imu_update(uint32_t now_ms, int still)
     if (icm_read_n(zout_reg, b, 2) != 0) {
         imu_dbg_fail_cnt++;
         imu_dbg_state = (uint8_t)(1U | 2U);      /* 在线但最近读失败 */
-        yaw_last_ms = now_ms;                    /* 不积分；时间戳跟上防跳变 */
         return;
     }
     imu_dbg_state = 1U;
+    last_successful_sample_ms = now_ms;
+    successful_sample_valid = 1U;
     float raw = (float)(int16_t)(((uint16_t)b[0] << 8) | b[1]);
 
     /* 静止零偏重置：按读数"范围"判静止（对陈旧零偏鲁棒——课设实测教训：
@@ -282,6 +289,12 @@ void imu_update(uint32_t now_ms, int still)
 }
 
 int   imu_ok(void)           { return chip != CHIP_NONE; }
+int   imu_sample_fresh(uint32_t now_ms)
+{
+    return chip != CHIP_NONE &&
+        wheel_control_sample_fresh(now_ms, last_successful_sample_ms,
+                                   successful_sample_valid);
+}
 float imu_yaw_deg(void)      { return yaw_now; }
 float imu_yaw_rate_dps(void) { return rate_dps_now; }
 void  imu_zero_yaw(void)     { yaw_now = 0.0f; }

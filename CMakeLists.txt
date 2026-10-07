@@ -46,8 +46,11 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     Core/Src/app_car.c
+    Core/Src/app_wheel_control.c
     Core/Src/app_can.c
+    Core/Src/app_can_control_policy.c
     Core/Src/app_serial.c
+    Core/Src/app_serial_session.c
     Core/Src/app_protocol_v2.c
     Core/Src/app_imu.c
     Core/Src/app_oled.c

@@ -13,6 +13,7 @@
 void  imu_init(void);                         /* [AI]  调度器前调用；未找到芯片时静默降级 */
 void  imu_update(uint32_t now_ms, int still); /* [AI]  100Hz；still=轮子确实静止(允许零偏重置) */
 int   imu_ok(void);                           /* [AI]  1=芯片在线 */
+int   imu_sample_fresh(uint32_t now_ms);      /* [AI]  最近成功样本年龄不超过 20 ms */
 float imu_yaw_deg(void);                      /* [AI]  积分航向(°)；imu_zero_yaw 后的相对值 */
 float imu_yaw_rate_dps(void);                 /* [AI]  偏航角速度(°/s)，已扣零偏 */
 void  imu_zero_yaw(void);                     /* [AI]  当前航向置 0（进入驱动模式时调用） */

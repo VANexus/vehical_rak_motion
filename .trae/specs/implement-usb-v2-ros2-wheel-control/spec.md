@@ -38,11 +38,29 @@ v2 握手 SHALL 要求 feature bits 0、1、2 全部存在。v1 机体速度协�
 - **AND** 任一 required feature 缺失、版本不匹配或 CRC/序号无效时，主机保持 DISARMED
 - **AND** 主机不得改用 v1 格式重试控制
 
+#### Scenario: DMA 接收环形缓冲溢出
+
+- **WHEN** USART DMA 生产位置追上或越过尚未消费的接收数据
+- **THEN** F407 检测并计数 RX overrun，不得把环回到相同 NDTR 位置误判为“没有新数据”
+- **AND** 丢弃不完整帧并重新同步到后续 COBS 定界符
+- **AND** 被覆盖/不完整帧不得更新命令、状态或 lease
+- **AND** HT/TC/IDLE 回调乱序不得回退或虚增单调生产位置
+
+#### Scenario: DMA 重武装失败
+
+- **WHEN** USART 初始接收或 HAL 错误回调中的 `ReceiveToIdle_DMA` 重武装返回失败
+- **THEN** F407 记录 RX 错误，并由 1 kHz service 在任务上下文每端口最多发起一次非阻塞重试
+- **AND** 端口停收状态不得静默持续或刷新命令 lease
+- **AND** USART 错误 ISR 只置恢复标志；DMA 重装和 64 位 RX 游标重置由任务单写者执行
+- **AND** 单次 service 不得进入无界重试循环，持续失败时状态和错误计数必须可观察
+
 ### Requirement: 四轮速度命令由上位机做麦轮 IK
 
 v2 DRIVE_COMMAND SHALL 固定使用前左、前右、后左、后右顺序，在线路上传输 rad/s 轮速。本阶段 F407 SHALL 只接收四轮目标，不得在 MCU 对 body Twist 执行麦轮逆运动学；上位机控制器实现不属于本阶段。
 
-F407 SHALL 对最终四轮目标执行一个共同饱和系数，不得逐轮独立截断。轮目标到 MCU counts/ms 的转换 SHALL 在任务上下文完成，不得在 25 kHz ISR 中执行浮点或阻塞工作。
+- F407 对应用编码器方向归一化后的四轮目标 SHALL 只执行一次 encoder sign 变换；已经归一化的目标 SHALL NOT 再乘方向符号。
+- F407 对稳定补偿后的四轮目标 SHALL 施加同一个饱和系数，不得逐轮独立截断。
+- 四轮目标 SHALL 以一致快照提交给控制任务，不能让控制任务读到跨帧混合的轮目标；编码器位置与 encoder epoch SHALL 在重置并发时保持同一代快照。
 
 #### Scenario: 同时平移与旋转的轮目标超限
 
@@ -74,7 +92,7 @@ v2 实现 SHALL NOT 复用 R21 中“修改 body `wz` 后再做 MCU IK”的稳�
 
 ### Requirement: F407 上报测量轮状态并完成轮式里程计
 
-F407 SHALL 基于四路编码器的一致采样，提供轮位置、轮速度、采样时刻、valid mask 和 encoder epoch。轮状态 SHALL 是传感器测量值，不得由命令目标伪造。
+F407 SHALL 基于四路编码器的一致采样，提供轮位置、轮速度、采样时刻、valid mask 和 encoder epoch。轮状态 SHALL 是传感器测量值，不得由命令目标伪造。采样时刻 SHALL 与本次编码器快照一致，年龄判断 SHALL 使用同一或更新的单调时钟样本，不得把微小的未来时间戳误判为超时。
 
 F407 SHALL 以 v2 DRIVE_STATE 发布测量轮状态；四轮 counts/rev、有效滚动半径、轮向及麦轮几何 SHALL 经本阶段测量并形成签核记录。上位机如何消费 wheel odometry 不属于本阶段。
 
@@ -103,6 +121,29 @@ v2 固件 SHALL 在复位、冷启动和重连后保持 DISARMED，目标为零�
 - **THEN** drive 与 arm 均 DISARMED，四轮目标为零
 - **AND** 不发生 PC6 自动扫动
 
+### Requirement: 急停锁存优先于所有电机输出模式
+
+F407 的急停锁存 SHALL 在 25 kHz ISR 的任何 RUNNING、CALIBRATING、bench/self-test、REMOTE 输出分支之前检查。锁存有效时，本周期及后续周期 SHALL 持续输出安全制动/零目标；任何校准脉冲、kick、PWM 更新不得覆盖急停输出。CAN v3 急停只允许置锁存/停机，不得启动或清锁。
+
+USB v2 `SAFETY_COMMAND.LATCH_INHIBIT` SHALL 触发同一底盘急停锁存和 25 kHz 制动路径；`STOP` 只执行协议定义的受控停止，不得与锁存急停混为一谈。LATCH 在 remote、bench、self-test 和 calibration 模式都必须阻止后续 PWM 输出。
+
+#### Scenario: 急停发生在校准或 bench 运行期间
+
+- **WHEN** 急停锁存于 CALIBRATING、RUNNING 或 self-test 模式
+- **THEN** 当前 25 kHz 周期即执行制动/零目标
+- **AND** 后续 ISR 不得再次输出校准 PWM、kick duty 或其他驱动占空比
+- **AND** 只有满足安全条件的显式 clear 才可解除锁存，恢复后仍保持 DISARMED
+
+#### Scenario: 显式清除急停锁存
+
+- **WHEN** USB v2 的合法 CLEAR_INHIBIT 通过 owner、序号及 safety condition 校验，PD3 本地使能开关关闭且内部故障已清
+- **THEN** F407 原子清除 pending `motor_command`、旧 drive/arm 目标、所有 enable 和 bench/calibration 启动状态
+- **AND** 车端急停 latch 与 session inhibit 作为同一清锁事务解除，不得只清其中一层
+- **AND** 急停锁存解除后仍为 DISARMED/零目标
+- **AND** 只有新的、后续的显式 v2 drive ARM 命令可以请求轮端使能；CAN clear 或旧排队命令不得恢复运动
+- **AND** drive clear 后必须先接收更新序号的 DISARMED 零目标确认帧；此帧之前到达的 ARMED DRIVE（包括同一 RX 批次内的帧）必须拒绝且不得刷新 lease
+- **AND** 操作员必须先物理确认外部急停已释放；C30D 当前没有独立急停反馈输入，固件不得声称已自动检测其释放
+
 ## MODIFIED Requirements
 
 ### Requirement: F407 USB 控制入口
@@ -112,6 +153,14 @@ v2 固件 SHALL 在复位、冷启动和重连后保持 DISARMED，目标为零�
 ### Requirement: 当前工作范围限于下位机与协议
 
 本阶段 SHALL 修改和验证 F407 固件与 v2 wire contract。上位机现有 v2 codec 可作为只读 peer/参考，但 SHALL NOT 修改上位机驱动、C++ 硬件插件、Nav2、MoveIt2 或 `ros2_control` 配置。
+
+CAN v3 SHALL NOT 作为第二个 drive/arm 命令入口；本阶段 USB v2 是唯一可改变轮目标或 ARM 状态的远程控制协议。CAN 紧急停止只允许作为单向禁止/停止输入保留，CAN 速度、START 或清除锁存命令不得改变 v2 wheel target 或重新使能。
+
+#### Scenario: CAN v3 不与 USB v2 争用执行器
+
+- **WHEN** F407 收到 CAN v3 速度、START 或 clear 命令
+- **THEN** 这些帧不得改变当前 v2 command、lease 或 arm 状态
+- **AND** CAN 紧急停止可以撤销 drive/arm enable，但不得建立新的运动许可
 
 ## REMOVED Requirements
 

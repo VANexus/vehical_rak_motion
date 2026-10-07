@@ -102,11 +102,11 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   static const osThreadAttr_t ctrl_attr = {
-    .name = "ctrl", .stack_size = 1024, .priority = (osPriority_t) osPriorityHigh };
+    .name = "ctrl", .stack_size = 2048, .priority = (osPriority_t) osPriorityHigh };
   static const osThreadAttr_t canrx_attr = {
-    .name = "canrx", .stack_size = 1024, .priority = (osPriority_t) osPriorityAboveNormal };
+    .name = "canrx", .stack_size = 2048, .priority = (osPriority_t) osPriorityAboveNormal };
   static const osThreadAttr_t cantx_attr = {
-    .name = "cantx", .stack_size = 1024, .priority = (osPriority_t) osPriorityNormal };
+    .name = "cantx", .stack_size = 2048, .priority = (osPriority_t) osPriorityNormal };
   static const osThreadAttr_t stat_attr = {
     .name = "stat", .stack_size = 2048, .priority = (osPriority_t) osPriorityBelowNormal };
   /* [AI]  创建失败 = 堆不足。静默跑下去的后果是 25kHz ISR 永不启动
@@ -139,14 +139,10 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
   (void)argument;   /* [AI]  未使用（其余四个任务同款写法），-Wextra 要求显式 */
-  /* [AI] 舵机自检：只扫 ch0 = PC6（约 3 秒一轮，循环）
-     用途：确认底盘固件 + 舵机代码合并后能正常工作。
-     ⚠️ 只在舵机没装到机械臂上时用；装好后要换成正经控制程序。
-     ⚠️ 故意只扫 ch0——ch5=PB15 是板上阿克曼转向舵机口，全扫会误伤。 */
+  /* [AI] PC6 自检保留为 servo_sweep_test() 诊断 API，不在启动任务中触发。 */
   for(;;)
   {
-    servo_sweep_test(0);
-    osDelay(500);
+    osDelay(1000);
   }
   /* USER CODE END StartDefaultTask */
 }
@@ -226,4 +222,3 @@ void vApplicationMallocFailedHook(void)
 }
 
 /* USER CODE END Application */
-

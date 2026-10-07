@@ -3,11 +3,12 @@
  *
  * [AI]  协议规范见 docs/PROTOCOL.md（v3）：小端、DLC=8、byte6=counter(高4位)|
  * [AI]  flags(低4位)、byte7=CRC8(poly 0x07, 初值=该帧 Data ID, 覆盖字节0-6)。
- * [AI]  本文件实现：0x100 VEL_CMD(收) / 0x010 SAFETY(收, 急停走中断快速路径) /
+ * [AI]  本文件实现：0x100 VEL_CMD(拒绝控制) / 0x010 SAFETY(仅急停单向停机) /
  * [AI]  0x200 VEL_FB(发 100Hz) / 0x030 XFER(发 1kHz) / 0x230 NODE_INFO(发 1Hz)。
  */
 #include "app_can.h"
 #include "app_car.h"
+#include "app_can_control_policy.h"
 #include "app_serial.h"
 #include "main.h"
 #include "can.h"
@@ -21,7 +22,7 @@
    本文件保留对 TSR 的直读/直写（发送邮箱自愈见 can_tx_task_step）。 */
 
 /* [AI]  CAN v3 帧 ID 与 Data ID（CRC 初值）—— docs/PROTOCOL.md §3 */
-#define CID_SAFETY       0x010U
+#define CID_SAFETY       CAN_V3_ID_SAFETY
 #define DID_SAFETY       0x01U
 #define CID_EMCY_CH      0x020U
 #define DID_EMCY_CH      0x02U
@@ -29,8 +30,7 @@
 #define DID_XFER_CH2ARM  0x04U
 #define CID_XFER_ARM2CH  0x031U
 #define DID_XFER_ARM2CH  0x05U
-#define CID_VEL_CMD      0x100U
-#define DID_VEL_CMD      0x06U
+#define CID_VEL_CMD      CAN_V3_ID_CHASSIS_VELOCITY
 #define CID_VEL_FB       0x200U
 #define DID_VEL_FB       0x09U
 #define CID_DIAG         0x201U
@@ -50,7 +50,6 @@ static int16_t arm_fault_code;
 static uint32_t arm_last_ms;
 static uint8_t arm_seen;        /* [AI]  0x031: 机械臂故障码（暂存） */
 static int16_t arm_j4_pos, arm_base_pos;
-static uint8_t last_cmd_cnt;          /* [AI]  0x100 计数器校验（低4位） */
 
 uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init)
 {
@@ -126,13 +125,19 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
         f.id = hdr.StdId;
         for (unsigned k = 0; k < 8U; ++k) f.data[k] = d[k];
         /* [AI]  急停快速路径：不进队列，置标志由 25kHz ISR 立即执行(≤40µs) */
+        can_v3_control_action_t action = CAN_V3_ACTION_NONE;
         if (f.id == CID_SAFETY &&
-            crc8(f.data, 7U, DID_SAFETY) == f.data[7] &&
-            (f.data[0] & 0x0FU) == 0x4U) {
-            car_estop_request_fast();
-        } else {
-            (void)xQueueSendFromISR(rx_queue, &f, &woken);
+            crc8(f.data, 7U, DID_SAFETY) == f.data[7]) {
+            action = can_v3_control_policy(
+                (uint16_t)f.id, (uint8_t)(f.data[0] & 0x0FU));
         }
+        if (action == CAN_V3_ACTION_EMERGENCY_STOP) {
+            car_estop_request_fast();
+            continue;
+        }
+        if (f.id == CID_SAFETY || f.id == CID_VEL_CMD)
+            continue;
+        (void)xQueueSendFromISR(rx_queue, &f, &woken);
     }
     portYIELD_FROM_ISR(woken);
 }
@@ -146,26 +151,12 @@ void can_rx_task_step(void)
     uint32_t now = HAL_GetTick();
     uint8_t did;
     switch (f.id) {
-    case CID_VEL_CMD:      did = DID_VEL_CMD; break;
-    case CID_SAFETY:       did = DID_SAFETY; break;
     case CID_XFER_ARM2CH:  did = DID_XFER_ARM2CH; break;
     default: return;
     }
     if (crc8(f.data, 7U, did) != f.data[7]) return;   /* 1. CRC */
 
-    if (f.id == CID_VEL_CMD) {
-        /* [AI]  2. counter 校验: 高4位, 期望+1; +0=重复帧丢弃 */
-        uint8_t cnt = (uint8_t)(f.data[6] >> 4);
-        uint8_t diff = (uint8_t)(cnt - last_cmd_cnt);
-        if (diff == 0U || cnt == last_cmd_cnt) return;   /* [AI]  重复帧丢弃 */
-        last_cmd_cnt = cnt;
-        car_can_velocity(get_le16(&f.data[0]), get_le16(&f.data[2]),
-                         get_le16(&f.data[4]) / 10,      /* 0.001→0.01 rad/s */
-                         (uint8_t)(f.data[6] & 1U), now);
-    } else if (f.id == CID_SAFETY) {
-        uint16_t cmd = (uint16_t)f.data[0] | ((uint16_t)f.data[1] << 8);
-        car_can_control((uint8_t)(cmd & 0xFFU), now);    /* START/STOP/ESTOP/… */
-    } else if (f.id == CID_XFER_ARM2CH) {
+    if (f.id == CID_XFER_ARM2CH) {
         arm_seen = 1U;                   /* [AI]  R16: 对端在线证据(UART v1 fault bit2/3) */
         arm_last_ms = now;
         arm_fault_code = (int16_t)get_le16(&f.data[0]);
@@ -198,7 +189,7 @@ void can_tx_task_step(uint32_t now_ms)
 
     serial_poll_tx();                    /* 1kHz 泵串口 TX（R20: DMA 版） */
     serial_rx_service(); /* [AI]  R20: RX 循环 DMA 排水→COBS 解码（任务侧轮询） */
-    serial_v1_tick(now_ms);          /* [AI]  R16: UART v1 lease 看门狗 + BASE_STATE 节拍 */
+    serial_v2_tick(now_ms);          /* [AI] UART v2 lease、安全状态与遥测节拍 */
 
     /* [AI]  邮箱死锁自愈：错误风暴后 bxCAN 可把邮箱挂在"忙但不再重试"态，
        固件只查 TME 会永远不再排帧→整机静默；任一邮箱忙超 150ms 强制
@@ -247,7 +238,6 @@ void can_tx_task_step(uint32_t now_ms)
         d[6] = (uint8_t)((ni_seq++ & 0xFU) << 4);
         d[7] = crc8(d, 7U, DID_NODEINFO);
         (void)can_tx(CID_NODEINFO, d);
-        serial_push_text(SERIAL_BANNER);   /* [AI]  R15: 串口识别横幅 @1Hz */
     }
 }
 
