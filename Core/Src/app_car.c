@@ -137,7 +137,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R42";   /* [AI] R42: ARM 命令落地——v2 ARM_COMMAND(7轴µrad)→servo_set_pulse（轴序 J1..J6+夹爪→ch5..ch0 见 app_car.h），打开 arm_commissioned，axis 0~270°↔500~2500µs；R41: 舵机测试收官——R40 极限互切测试代码整体移除，短按恢复 start_run；R39: 遥测 EMA（α=1/16 @1kHz）压 M-method 量化噪声，PI 快环不变；R38: encoder_sign kick 学习持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
+const char build_tag[] = "R43";   /* [AI] R43: 按钮生产化——短按=清急停锁存（锁存分支内处理，过 car_estop_clear 安全门）、长按=本地急停（25kHz 快速路径 + release_required），台架启动/麦轮自检的按钮触发移除，电机启动只走 USB/CAN 显式指令；R42: ARM 命令落地——v2 ARM_COMMAND(7轴µrad)→servo_set_pulse（轴序 J1..J6+夹爪→ch5..ch0 见 app_car.h），打开 arm_commissioned，axis 0~270°↔500~2500µs；R41: 舵机测试收官（R40 互切测试移除）；R39: 遥测 EMA；R38: encoder_sign kick 学习持久化；R37: 使能门放宽；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -392,18 +392,9 @@ static uint8_t mt_running;
 static uint8_t mt_stop_req;
 static uint8_t mt_index;
 static uint32_t mt_step_ms;
-
-static void start_motion_test(uint32_t now)
-{
-    reset_positions();
-    imu_zero_yaw();   /* [AI]  R9: 以进入自检时的航向为参考 */
-    for (unsigned i = 0; i < MOTOR_COUNT; ++i) motors[i].phase = MOTOR_DRIVE;
-    mt_index = 0;
-    mt_step_ms = now;
-    mt_stop_req = 0;
-    mt_running = 1;
-    mode = IDLE;
-}
+/* [AI] R43: start_motion_test() 已随按钮生产化移除——自检序列（mt_*）仅存
+   遗留状态机与停止分支，无启动入口，保留以最小化本次改动面；
+   如需彻底退役再单独清理 mt_* 全链路。 */
 
 /* ---- 100 Hz supervisor (runs in Task_Control) ---- */
 static int32_t ik_wheel_target(unsigned i, int32_t vx, int32_t vy, int32_t wz)
@@ -678,8 +669,8 @@ void car_control_step(uint32_t now)
 
     uint8_t controls_allowed =
         car_control_inputs_allowed(estop_latched, car_estop_fast_req);
-    /* operator inputs: short press = bench run start/stop, long press =
-       mecanum motion self-test start/stop */
+    /* operator inputs: [AI] R43 生产化语义 —— 短按=清急停锁存，长按=本地急停。
+       原台架启动/麦轮自检的按钮触发已移除；电机启动只走 USB/CAN 显式指令路径。 */
     int bev = button_pressed_event(now);
     if (controls_allowed == 0U) {
         motor_command = 0U;
@@ -690,6 +681,12 @@ void car_control_step(uint32_t now)
         mt_running = 0U;
         mt_stop_req = 0U;
         if (mode != FAULT) mode = STOPPED;
+        /* [AI] R43 急停锁存态下的短按清锁：必须在这里处理（本分支 return 早于
+           下方 bev 分支）。release_required 保证按住不放不会立刻清锁；
+           car_estop_clear 内部再过安全门（使能开关+电池+非 FAULT），不满足则拒绝。 */
+        if (bev == 1 && estop_button_release_required == 0U) {
+            (void)car_estop_clear();
+        }
         return;
     }
     if (estop_button_release_required != 0U) {
@@ -698,21 +695,21 @@ void car_control_step(uint32_t now)
             estop_button_release_required = 0U;
     }
 
+    /* [AI] R43 按钮生产化语义（未锁存态）：
+       短按 = 若自检在跑则停止（自检为遗留测试路径，生产上不会启动）；
+       长按 = 本地急停：置 car_estop_fast_req，由 25kHz ISR ≤40µs 刹车锁存
+       （与 CAN 0x010 / USB LATCH 同一快速路径），并要求按钮释放后才接受清锁。
+       清锁后的复位动作在上方锁存分支处理。 */
     if (bev == 1) {
         if (mt_running != 0U) {
             mt_stop_req = 1U;
-        } else if (mode == RUNNING) {
-            brake_all();
-            mode = STOPPED;
-        } else if (mode != CALIBRATING) {
-            start_run(now);
         }
     } else if (bev == 2) {
         if (mt_running != 0U) {
             mt_stop_req = 1U;
-        } else if (mode != RUNNING && mode != CALIBRATING) {
-            start_motion_test(now);
         }
+        car_estop_request_fast();
+        estop_button_release_required = 1U;
     }
     if (motor_command != 0U) {
         uint32_t command = motor_command;
