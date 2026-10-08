@@ -150,8 +150,11 @@ static uint8_t mode_u8(void)
 /* [AI] 过滤器自愈用：can_init 时保存配置；FA1R/FFA1R 运行时被未知源篡改的
    实测签名 = 帧被 ACK 但不进 FIFO（RX 静默死亡 3/3 复现，冷启动恢复）。
    bxCAN 过滤器寄存器不在 CAN_TypeDef 内，只能直读地址（同 TSR 自愈先例）。 */
-#define CAN1_FFA1R_ADDR  (*(volatile uint32_t *)0x4000660CUL)
-#define CAN1_FA1R_ADDR   (*(volatile uint32_t *)0x40006610UL)
+/* [AI] R57 修正：过滤器寄存器真实偏移按 CMSIS（FMR=0x200, FM1R=0x204, FS1R=0x20C,
+   FFA1R=0x214, FA1R=0x21C, FR1=0x240）。此前误用 0x660C/0x6610（实为 FS1R/保留区），
+   导致"寄存器被篡改"误判与每秒空跑自愈。 */
+#define CAN1_FFA1R_ADDR  (*(volatile uint32_t *)0x40006614UL)
+#define CAN1_FA1R_ADDR   (*(volatile uint32_t *)0x4000661CUL)
 static CAN_FilterTypeDef can_flt_saved;
 
 /* [AI]  ---- 初始化：过滤器/启动/通知在本函数，队列先于中断使能创建 ---- */
@@ -344,11 +347,16 @@ void can_tx_task_step(uint32_t now_ms)
         busoff_prev = bo;
     }
 
-    /* [AI] R51: 过滤器自愈 @1Hz——FA1R.FACT0 被清或 FFA1R.FFA0 被置（帧被拒收、
-       RX 静默死亡）时整组重配。HAL_CAN_ConfigFilter 自带 FINIT 进出，µs 级。 */
+    /* [AI] R56: RX 链路自愈 @1Hz——实测两类寄存器篡改都会造成 RX 静默死亡：
+       ① FA1R.FACT0 被清 / FFA1R.FFA0 被置（帧被 ACK 但过滤器拒收，不进 FIFO）
+       ② IER.FMPIE0 被清（帧进 FIFO 但无中断，FIFO 塞满 3 帧后溢出丢弃）
+       修复：过滤器整组重配 + 重挂 RX FIFO0 通知。均 HAL 路径，µs 级。 */
     if (ph == 500U) {
         if ((CAN1_FA1R_ADDR & 0x1UL) == 0U || (CAN1_FFA1R_ADDR & 0x1UL) != 0U) {
             (void)HAL_CAN_ConfigFilter(&hcan1, &can_flt_saved);
+        }
+        if ((CAN1->IER & CAN_IER_FMPIE0) == 0U) {
+            (void)HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
         }
     }
     if (ph % 10U == 0U) {                            /* 100 Hz：轮位×2 + 轮速 */

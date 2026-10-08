@@ -102,13 +102,13 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_THREADS */
   static const osThreadAttr_t ctrl_attr = {
-    .name = "ctrl", .stack_size = 2048, .priority = (osPriority_t) osPriorityHigh };
+    .name = "ctrl", .stack_size = 4096, .priority = (osPriority_t) osPriorityHigh };
   static const osThreadAttr_t canrx_attr = {
-    .name = "canrx", .stack_size = 2048, .priority = (osPriority_t) osPriorityAboveNormal };
+    .name = "canrx", .stack_size = 4096, .priority = (osPriority_t) osPriorityAboveNormal };
   static const osThreadAttr_t cantx_attr = {
-    .name = "cantx", .stack_size = 2048, .priority = (osPriority_t) osPriorityNormal };
+    .name = "cantx", .stack_size = 4096, .priority = (osPriority_t) osPriorityNormal };
   static const osThreadAttr_t stat_attr = {
-    .name = "stat", .stack_size = 2048, .priority = (osPriority_t) osPriorityBelowNormal };
+    .name = "stat", .stack_size = 4096, .priority = (osPriority_t) osPriorityBelowNormal };
   /* [AI]  创建失败 = 堆不足。静默跑下去的后果是 25kHz ISR 永不启动
      （car_start_control_isr 在 ctrl 线程首拍），而板子看起来"活着"——
      这是最难查的失败模式，所以显式兜底。 */
