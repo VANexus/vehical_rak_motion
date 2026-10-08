@@ -37,6 +37,14 @@ uint8_t car_wheel_calibration_ready(void);
 void car_wheel_command_urad(const int32_t wheel_urad_s[CAR_MOTOR_COUNT],
                             uint8_t enable, uint32_t now);
 uint8_t car_estop_clear(void);          /* [AI] 仅清锁成功返回非零；由 USB v2 DRIVE clear 调用 */
+/* [AI] R42: USB v2 ARM 命令落地(7 轴位置)。
+   轴序单点定义: axis[0..6] = J1(腰,PB15) J2(大臂,PB14) J3(肘,PC9) J4(小臂,PC8)
+   J5(腕俯仰,PC7) J6(腕圆周,PC6) 夹爪(暂无通道)。
+   位置语义: 舵机输出轴角,0~270° 满量程 ↔ 500~2500µs(实测 MG995/996R 口径);
+   J2 机械限位 0~135° 由本体挡块兜底。J1/J6 实测为连续旋转舵机——
+   该两轴 position_urad 解释为"速度偏置"(中位=停转),由上位机 TUI/标定层约定。
+   valid_mask 第 i 位=1 才更新该轴,否则该轴保持 1500µs 中位。 */
+void car_arm_command_urad(const int32_t position_urad[7], uint8_t valid_mask);
 uint64_t car_uptime_us(uint32_t tick_ms);
 /* [AI] R22: 编码器一致采样快照(DRIVE_STATE 组包用):归一化位置 urad、
    速度 urad/s、valid mask(encoder_sign 已标定)、epoch、采样时刻 µs。 */

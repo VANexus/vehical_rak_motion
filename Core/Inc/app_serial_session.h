@@ -24,6 +24,7 @@ typedef struct {
     uint8_t arm_armed;
     uint8_t safety_inhibited;
     uint8_t drive_feedback_valid_mask;
+    uint8_t arm_command_valid_mask;   /* [AI] R42: ARM 命令有效轴掩码（落地舵机用） */
     uint8_t arm_measured_valid_mask;
     uint8_t arm_measured_source;
     uint32_t accepted_features;

@@ -236,7 +236,11 @@ void serial_v2_tick(uint32_t now_ms)
     serial_v2_session_set_estop_clear_allowed(
         &v2_session, estop_clear_allowed);
     serial_v2_session_set_drive_feedback(&v2_session, &feedback);
-    serial_v2_session_set_arm_commissioned(&v2_session, 0U);
+    /* [AI] R42: 打开 ARM 子系统委托（此前硬编码 0）。安全门仍齐：
+       mode=0 立即清、lease 看门狗、ESTOP/inhibit、external_faults。
+       ⚠️ external_faults 含 imu/calibration 未就绪位——臂上电动作要求
+       整车外部门清零（与 drive 同门槛），台架无 IMU 时 ARM 不会 arm。 */
+    serial_v2_session_set_arm_commissioned(&v2_session, 1U);
     serial_v2_session_snapshot(&v2_session, &snapshot);
     if (snapshot.safety_latch_generation != safety_latch_generation) {
         safety_latch_generation = snapshot.safety_latch_generation;
@@ -267,5 +271,12 @@ void serial_v2_tick(uint32_t now_ms)
     if (snapshot.handshake_complete) {
         car_wheel_command_urad(snapshot.wheel_target_urad_s,
                                snapshot.drive_armed, now_ms);
+    }
+    /* [AI] R42: ARM 命令落地舵机。arm_armed 由会话层 lease/estop/inhibit 把关，
+       disarm 或 lease 过期时 snapshot.arm_armed=0，这里不再刷脉宽——
+       舵机保持最后一帧位置（50Hz PWM 由硬件自续，安全位置由上位机负责下发）。 */
+    if (snapshot.handshake_complete && snapshot.arm_armed != 0U) {
+        car_arm_command_urad(snapshot.arm_command_position_urad,
+                             snapshot.arm_command_valid_mask);
     }
 }

@@ -2,6 +2,7 @@
 #include "app_sign_store.h"
 #include "app_imu.h"
 #include "app_car_safety.h"
+#include "app_servo.h"   /* [AI] R42: ARM 命令落地 servo_set_pulse */
 #include "main.h"
 #include "tim.h"
 #include "adc.h"
@@ -136,7 +137,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R39";   /* [AI] R39: 遥测 EMA（α=1/16 @1kHz）压 M-method 量化噪声，PI 快环不变；R38: encoder_sign kick 学习持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
+const char build_tag[] = "R42";   /* [AI] R42: ARM 命令落地——v2 ARM_COMMAND(7轴µrad)→servo_set_pulse（轴序 J1..J6+夹爪→ch5..ch0 见 app_car.h），打开 arm_commissioned，axis 0~270°↔500~2500µs；R41: 舵机测试收官——R40 极限互切测试代码整体移除，短按恢复 start_run；R39: 遥测 EMA（α=1/16 @1kHz）压 M-method 量化噪声，PI 快环不变；R38: encoder_sign kick 学习持久化——Flash 扇区11 append-only（开机擦/运行编程/极性矛盾自检），预载后上电不再 kick 跳拍；R37: 使能门放宽——car_wheel_command_urad 不再要求 valid_mask==0x0F（未初始化轮走输出门 75% kick 学向，已初始化轮闭环），打通 R34-R36 学习链路；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -1012,6 +1013,33 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
     }
 
     publish_wheel_command(target_counts_ms, 1U, enable, now);
+}
+
+/* ---- [AI] R42: USB v2 ARM 命令 → 舵机脉宽（轴序/语义见 app_car.h） ----
+ * 0~270°(0~4,712,389µrad) 线性映射 500~2500µs;无效轴回 1500µs 中位。
+ * 100 Hz 调用（serial_v2_tick）,直接写 CCR,硬件自续波,无阻塞。 */
+void car_arm_command_urad(const int32_t position_urad[7], uint8_t valid_mask)
+{
+    /* axis i → servo 通道（装臂实测接线）: J1=ch5 J2=ch4 J3=ch3 J4=ch2 J5=ch1 J6=ch0 */
+    static const unsigned axis_to_ch[6] = { 5U, 4U, 3U, 2U, 1U, 0U };
+    const int32_t k_full_scale_urad = 4712389;   /* 270° in µrad */
+    const int32_t k_pulse_min = 500;
+    const int32_t k_pulse_max = 2500;
+
+    if (position_urad == NULL)
+        return;
+    for (unsigned axis = 0; axis < 6U; ++axis) {
+        if ((valid_mask & (1U << axis)) != 0U) {
+            int64_t us = (int64_t)k_pulse_min +
+                (int64_t)position_urad[axis] * (k_pulse_max - k_pulse_min) /
+                k_full_scale_urad;
+            if (us < k_pulse_min) us = k_pulse_min;
+            if (us > k_pulse_max) us = k_pulse_max;
+            servo_set_pulse(axis_to_ch[axis], (unsigned)us);
+        } else {
+            servo_set_pulse(axis_to_ch[axis], 1500U);
+        }
+    }
 }
 
 static uint64_t car_uptime_us_locked(uint32_t tick_ms)

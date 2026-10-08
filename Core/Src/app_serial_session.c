@@ -765,6 +765,7 @@ void serial_v2_session_snapshot(const serial_v2_session_t *session,
     snapshot->safety_inhibited =
         (uint8_t)(state->drive_inhibited || state->arm_inhibited);
     snapshot->drive_feedback_valid_mask = state->drive_feedback_valid_mask;
+    snapshot->arm_command_valid_mask = state->arm_valid_mask;   /* [AI] R42 */
     snapshot->arm_measured_valid_mask = 0U;
     snapshot->arm_measured_source = 0U;
     snapshot->accepted_features = state->accepted_features;
