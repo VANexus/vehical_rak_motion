@@ -81,13 +81,20 @@ uint8_t wheel_control_command_to_counts(
     const int32_t wheel_velocity_urad_s[WHEEL_COUNT],
     const wheel_calibration_t *calibration,
     int32_t target_counts_ms[WHEEL_COUNT]);
+/* [AI] R46: 轮级稳定 P→PD。
+ * yaw_error_mrad_s_out 可为 NULL（不要输出时传 NULL）。
+ * yaw_error_deriv_mrad_s2: 航向角速度误差的微分（角加速度, mrad/s²），
+ *   由调用方负责差分+滤波（本函数保持纯函数、无状态）。
+ * kd_permille: D 项增益（千分比，0=纯 P，行为与 R45 之前一致）。 */
 uint8_t wheel_control_stabilize(
     int32_t wheel_target_urad_s[WHEEL_COUNT],
     const int32_t measured_wheel_urad_s[WHEEL_COUNT],
     int32_t imu_yaw_rate_mrad_s,
     const wheel_calibration_t *calibration,
     uint32_t max_correction_urad_s, uint16_t gain_permille,
-    int32_t correction_urad_s[WHEEL_COUNT]);
+    int32_t correction_urad_s[WHEEL_COUNT],
+    int32_t *yaw_error_mrad_s_out,
+    int32_t yaw_error_deriv_mrad_s2, uint16_t kd_permille);
 uint8_t wheel_control_common_saturate(
     int32_t wheel_target[WHEEL_COUNT], int32_t max_abs_target);
 

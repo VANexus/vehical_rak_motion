@@ -15,13 +15,14 @@ void  imu_update(uint32_t now_ms, int still); /* [AI]  100Hz；still=轮子确�
 int   imu_ok(void);                           /* [AI]  1=芯片在线 */
 int   imu_sample_fresh(uint32_t now_ms);      /* [AI]  最近成功样本年龄不超过 20 ms */
 float imu_yaw_deg(void);                      /* [AI]  积分航向(°)；imu_zero_yaw 后的相对值 */
-float imu_yaw_rate_dps(void);                 /* [AI]  偏航角速度(°/s)，已扣零偏 */
+float imu_yaw_rate_dps(void);                 /* [AI]  偏航角速度(°/s)，已扣零偏，R47 起经 α=1/4 一级 IIR */
 void  imu_zero_yaw(void);                     /* [AI]  当前航向置 0（进入驱动模式时调用） */
 
 /* [AI]  诊断量（非 static，SWD 直读） */
 extern volatile float    imu_dbg_bias_lsb;    /* 当前零偏(raw LSB) */
 extern volatile float    imu_dbg_yaw_deg;     /* 航向(°) */
 extern volatile float    imu_dbg_rate_dps;    /* 角速度(°/s) */
+extern volatile float    imu_dbg_still_range; /* [AI] R47: 最近提交零偏窗口的 raw 峰谷范围——IMU_STILL_LSB 标定依据 */
 extern volatile uint8_t  imu_dbg_state;       /* bit0=芯片在线 bit1=最近一次读失败 */
 extern volatile uint32_t imu_dbg_fail_cnt;    /* 累计读失败(EMI) */
 extern volatile uint8_t  imu_dbg_chip;        /* 0=无 1=ICM20948 2=MPU6050 */

@@ -298,7 +298,9 @@ uint8_t wheel_control_stabilize(
     int32_t imu_yaw_rate_mrad_s,
     const wheel_calibration_t *calibration,
     uint32_t max_correction_urad_s, uint16_t gain_permille,
-    int32_t correction_urad_s[WHEEL_COUNT])
+    int32_t correction_urad_s[WHEEL_COUNT],
+    int32_t *yaw_error_mrad_s_out,
+    int32_t yaw_error_deriv_mrad_s2, uint16_t kd_permille)
 {
     static const int8_t rotation_pattern[WHEEL_COUNT] = {-1, 1, -1, 1};
     int64_t yaw_from_encoders_mrad_s;
@@ -309,6 +311,8 @@ uint8_t wheel_control_stabilize(
         return 0U;
     for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
         correction_urad_s[i] = 0;
+    if (yaw_error_mrad_s_out != NULL)
+        *yaw_error_mrad_s_out = 0;
 
     if (wheel_target_urad_s == NULL || measured_wheel_urad_s == NULL ||
         !wheel_control_calibration_valid(calibration) ||
@@ -327,9 +331,21 @@ uint8_t wheel_control_stabilize(
         clamp_i64(yaw_from_encoders_mrad_s, -2000000LL, 2000000LL);
     yaw_error_mrad_s = (int64_t)imu_yaw_rate_mrad_s -
                        yaw_from_encoders_mrad_s;
+    if (yaw_error_mrad_s_out != NULL)
+        *yaw_error_mrad_s_out = (int32_t)clamp_i64(yaw_error_mrad_s,
+                                                   INT32_MIN, INT32_MAX);
+    /* [AI] R46: PD——P 项抑制稳态打滑，D 项（角加速度域）抑制打滑瞬态。
+       D 与 P 同杠杆/半径系数，先行钳位微分再合成，总输出仍受 max_correction。 */
     correction = -yaw_error_mrad_s *
                  calibration->rotational_lever_um * gain_permille /
                  calibration->wheel_radius_um;
+    if (kd_permille != 0U && yaw_error_deriv_mrad_s2 != 0) {
+        int64_t deriv = clamp_i64(yaw_error_deriv_mrad_s2,
+                                  -2000000LL, 2000000LL);
+        correction += -deriv *
+                      calibration->rotational_lever_um * kd_permille /
+                      calibration->wheel_radius_um;
+    }
     if (max_correction_urad_s > (uint32_t)INT32_MAX)
         max_correction_urad_s = (uint32_t)INT32_MAX;
     correction = clamp_i64(correction, -(int64_t)max_correction_urad_s,

@@ -137,7 +137,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R44";   /* [AI] R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
+const char build_tag[] = "R48";   /* [AI] R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -223,6 +223,17 @@ static void encoder_start(void)
    2 = long press (fired once while held >= LONG_PRESS_MS) */
 #define BTN_DEBOUNCE_MS  30U
 #define LONG_PRESS_MS    1200U
+/* [AI] R48: PE0 EXTI 事件落点（ISR 只置标志，电平在任务侧复读，逻辑全在任务）。
+   优先级 7 > configMAX_SYSCALL(5)，回调内不可用 FreeRTOS API；这里连 HAL_GetTick
+   都不需要——消抖时钟本来就在 100 Hz 任务里。 */
+static volatile uint8_t btn_edge_flag;
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_0)
+        btn_edge_flag = 1U;
+}
+
 static int button_pressed_event(uint32_t now)
 {
     static uint8_t stable;        /* 已消抖的生效电平 */
@@ -230,7 +241,14 @@ static int button_pressed_event(uint32_t now)
     static uint32_t changed_at;
     static uint32_t pressed_at;
     static uint8_t long_fired;
-    uint8_t raw = (uint8_t)(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);
+    /* [AI] R48: PE0 改 EXTI 双沿中断（.ioc GPXTI0 + 上拉），中断只打时间戳，
+       消抖状态机仍在 100 Hz 任务里跑——ISR 里不做消抖/不做业务逻辑。
+       已按下的静息态不产生边沿，需一次按下动作才会被检测（生产可接受）。 */
+    uint8_t raw = raw_prev;
+    if (btn_edge_flag != 0U) {
+        btn_edge_flag = 0U;
+        raw = (uint8_t)(HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_0) == GPIO_PIN_RESET);
+    }
     int ev = 0;
 
     if (raw != raw_prev) {
@@ -254,18 +272,23 @@ static int button_pressed_event(uint32_t now)
     return ev;
 }
 
-/* [AI] R20 CubeMX 迁移：ADC1(PB0/CH8, PCLK2/4 + 480 周期采样 + 软件触发)
+/* [AI] R48: 电池 ADC 改 DMA 连续转换（.ioc: ADC1 ContinuousConvMode/DMAContinuousRequests
+   ENABLE，DMA2_Stream0 循环半字缓冲，优先级 5）——battery_read_mv 只读缓冲做均值，
+   不再每 10 ms Start/Poll/Stop（原轮询最多阻塞 1 ms）。DMA 由 car_init 启动一次。
+   缓冲 32 样本：转换率 ≈42 kSa/s（ADCCLK 21 MHz ÷ 492 周期），TC+HT 中断率
+   = 42k/32×2 ≈ 2.6 k/s——8 样本时是 ~10 k/s，白烧 CPU（R48 体检修正）。
+   [AI] R20 CubeMX 迁移：ADC1(PB0/CH8, PCLK2/4 + 480 周期采样 + 软件触发)
    由 MX_ADC1_Init 配置（原寄存器版的分频/采样时间修正已进 .ioc）；
    F4 的 HAL 无 ADC 校准 API（无需移植原 CAL 位操作）。 */
+#define ADC_BATT_BUF_N   32U
+static volatile uint16_t adc_batt_buf[ADC_BATT_BUF_N];
+
 static uint32_t battery_read_mv(void)
 {
-    uint32_t mv = 0U;
-    if (HAL_ADC_Start(&hadc1) == HAL_OK &&
-        HAL_ADC_PollForConversion(&hadc1, 1U) == HAL_OK) {
-        mv = HAL_ADC_GetValue(&hadc1) * 3300UL * 11UL / 4095UL;
-    }
-    (void)HAL_ADC_Stop(&hadc1);
-    return mv;
+    uint32_t sum = 0U;
+    for (unsigned i = 0; i < ADC_BATT_BUF_N; ++i)
+        sum += adc_batt_buf[i];
+    return sum * 3300UL * 11UL / (4095UL * ADC_BATT_BUF_N);
 }
 
 /* [AI] R20: IWDG 已由 MX_IWDG_Init 启动（HAL v1.28.3 的 HAL_IWDG_Init 内含
@@ -587,15 +610,52 @@ static int32_t wheel_target_limit_urad_s(void)
     return limit > INT32_MAX ? INT32_MAX : (int32_t)limit;
 }
 
+/* [AI] R46: 轮级稳定 D 项参数与状态（仅在 ctrl 任务上下文使用，非 ISR）。
+ * KD 取值保守（P 的 1.5 倍千分比），待实车标定复核；微分经 1/4 EMA
+ * 抑制编码器量化噪声，调用间隔 >100 ms 视为不连续（D 项清零重来）。 */
+#define WHEEL_STAB_KD_PERMILLE   150U
+static int32_t  stab_yaw_err_prev;
+static uint32_t stab_prev_tick;
+static int32_t  stab_deriv_f;
+static uint8_t  stab_prev_valid;
+
 static int wheel_stabilize_targets(int32_t target_urad_s[MOTOR_COUNT],
                                    const int32_t measured_urad_s[MOTOR_COUNT],
                                    int32_t imu_yaw_rate_mrad_s)
 {
     int32_t corrections[MOTOR_COUNT];
+    int32_t yaw_err = 0;
+    uint32_t now = HAL_GetTick();
+    int32_t deriv = 0;
+
+    /* [AI] R46: 航向角速度误差差分 + 1/4 EMA 低通（D 项输入）。
+       间隔异常（首次/停顿/时间回绕）时不输出微分并清状态。 */
+    if (stab_prev_valid != 0U) {
+        uint32_t dt = (uint32_t)(now - stab_prev_tick);
+        if (dt != 0U && dt <= 100U) {
+            int64_t de = (int64_t)(imu_yaw_rate_mrad_s - stab_yaw_err_prev) *
+                         1000 / (int32_t)dt;
+            stab_deriv_f += (int32_t)(de - stab_deriv_f) / 4;
+            deriv = stab_deriv_f;
+        } else {
+            stab_deriv_f = 0;
+        }
+    } else {
+        stab_deriv_f = 0;
+    }
+    stab_yaw_err_prev = imu_yaw_rate_mrad_s;
+    stab_prev_tick = now;
+    stab_prev_valid = 1U;
+
     if (!wheel_control_stabilize(
             target_urad_s, measured_urad_s, imu_yaw_rate_mrad_s,
-            &car_wheel_calibration, 100000U, 100U, corrections))
+            &car_wheel_calibration, 100000U, 100U, corrections,
+            &yaw_err, deriv, WHEEL_STAB_KD_PERMILLE)) {
+        stab_prev_valid = 0U;
         return 0;
+    }
+    /* [AI] R46: 差分基准用本轮真实误差（含编码器侧），比用 IMU 原值更准 */
+    stab_yaw_err_prev = yaw_err;
     if (!wheel_control_common_saturate(
             target_urad_s, wheel_target_limit_urad_s()))
         return 0;
@@ -605,6 +665,14 @@ static int wheel_stabilize_targets(int32_t target_urad_s[MOTOR_COUNT],
     dbg_slip = (uint8_t)(corrections[0] != 0 || corrections[1] != 0 ||
                          corrections[2] != 0 || corrections[3] != 0);
     return 1;
+}
+
+/* [AI] R46: 稳定链路不连续（指令零/数据不新鲜/急停）时清 D 项状态，
+   防止恢复驱动瞬间旧微分造成一脚"踢"。 */
+static void wheel_stabilize_reset(void)
+{
+    stab_prev_valid = 0U;
+    stab_deriv_f = 0;
 }
 
 /* [AI] R14: 遥控与麦轮自检共用的驱动下发路径（稳定器修正 → IK → 四路目标） */
@@ -646,6 +714,7 @@ static void drive_apply(int32_t vx, int32_t vy, int32_t wz)
             return;
         }
     }
+    wheel_stabilize_reset();   /* [AI] R46: 稳定链路未走通，清 D 项状态 */
     for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
         v_cmd[i] = target_counts_ms[i];
 }
@@ -881,16 +950,19 @@ void car_init(void)
        SystemClock_Config 由 CubeMX 生成且 HSE 8MHz+PLL 已确认（AGENTS.md 红线 3，
        重生成后必查 HSE 未被抹回 HSI）。 */
 
+    /* [AI] R45: 复位原因改走 HAL 宏（__HAL_RCC_GET_FLAG），不再直写 RCC->CSR——
+       R20 起外设/寄存器级操作一律由 CubeMX 生成或 HAL 提供，应用层只调 API。 */
     {
-        uint32_t csr = RCC->CSR;
-        if (csr & RCC_CSR_BORRSTF) reset_cause = (uint8_t)'B';
-        else if (csr & RCC_CSR_IWDGRSTF) reset_cause = (uint8_t)'I';
-        else if (csr & RCC_CSR_SFTRSTF) reset_cause = (uint8_t)'S';
-        else if (csr & RCC_CSR_PORRSTF) reset_cause = (uint8_t)'P';
+        if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST)) reset_cause = (uint8_t)'B';
+        else if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) reset_cause = (uint8_t)'I';
+        else if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST)) reset_cause = (uint8_t)'S';
+        else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST)) reset_cause = (uint8_t)'P';
         else reset_cause = (uint8_t)'-';
-        RCC->CSR |= RCC_CSR_RMVF;
+        __HAL_RCC_CLEAR_RESET_FLAGS();
     }
     wheel_target_mailbox_init(&wheel_command_mailbox);
+    /* [AI] R48: 启动 ADC1 DMA 连续转换（MX_ADC1_Init 已在前，时钟/DMA 均就绪） */
+    (void)HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_batt_buf, ADC_BATT_BUF_N);
     atomic_store_explicit(&encoder_generation, 0U, memory_order_relaxed);
     uptime_clock = (wheel_uptime_clock_t){0};
     encoder_epoch = 1U;   /* [AI] R22: 上电纪元从 1 起(0 留给"未初始化") */
@@ -1005,6 +1077,7 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
                 target_urad_s, &car_wheel_calibration, target_counts_ms));
     }
     if (enable == 0U) {
+        wheel_stabilize_reset();   /* [AI] R46: 稳定链路未走通，清 D 项状态 */
         for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
             target_counts_ms[i] = 0;
     }
@@ -1113,6 +1186,15 @@ void car_encoder_snapshot(int64_t pos_urad[MOTOR_COUNT],
     (void)wheel_control_encoder_state(
         raw_pos, raw_spd, sampled_mask, &car_wheel_calibration,
         pos_urad, vel_urad_s, valid_mask);
+    /* [AI] R47: 位置符号一致性——encoder_state 用预置 direction 归一位移，
+       但速度用的是 ISR 内学习极性(encoder_sign)归一后的 wheel_speed。
+       极性自检翻转/换线后两者可能相反：位置前向、速度反向（或反之），
+       上位机里程计直接坏。此处按学习极性对齐：学习≠预置则翻转位移。 */
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        if ((sampled_mask & (1U << i)) != 0U &&
+            signs[i] != car_wheel_calibration.encoder_direction[i])
+            pos_urad[i] = -pos_urad[i];
+    }
     /* [AI] R39: 速度用 Q8 EMA 直换 urad/s——保留 1/256 count 亚 LSB 精度，
        遥测量化噪声从 ±0.10 rad/s 降到 ±0.4 mrad/s 量级（滤波后）。
        counts_ms_q8 × (URAD_PER_REV×1000) / (CPR×256) = urad/s（64 位中间量） */

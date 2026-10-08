@@ -79,7 +79,9 @@ static void *encoder_reset_writer(void *context)
     return NULL;
 }
 
-static void test_default_calibration_is_unsigned_and_closed(void)
+/* [AI] R46: 用例语义随 R30 标定表预置而更新——默认 car_wheel_calibration
+   已是合法预置表（61600 CPR 等，历史台架值待实车复核），不再断言"无效"。 */
+static void test_default_calibration_is_preloaded_and_valid(void)
 {
     int32_t raw_position[WHEEL_COUNT] = {100, 100, 100, 100};
     int32_t raw_speed[WHEEL_COUNT] = {10, 10, 10, 10};
@@ -87,15 +89,17 @@ static void test_default_calibration_is_unsigned_and_closed(void)
     int32_t velocity[WHEEL_COUNT];
     uint8_t valid_mask = 0x0FU;
 
-    assert(!wheel_control_calibration_valid(&car_wheel_calibration));
-    assert(!wheel_control_encoder_state(
+    assert(wheel_control_calibration_valid(&car_wheel_calibration));
+    assert(wheel_control_encoder_state(
         raw_position, raw_speed, 0x0FU, &car_wheel_calibration,
         position, velocity, &valid_mask));
-    assert(valid_mask == 0U);
-    for (unsigned i = 0U; i < WHEEL_COUNT; ++i) {
-        assert(position[i] == 0);
-        assert(velocity[i] == 0);
-    }
+    assert(valid_mask == 0x0FU);
+    /* [AI] R46: 位置符号跟随 encoder_direction 预置 {1,-1,-1,1}；
+       速度符号只由 normalized_speed 符号决定（不经 direction 翻转） */
+    assert(position[0] > 0 && position[1] < 0);
+    assert(position[2] < 0 && position[3] > 0);
+    for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
+        assert(velocity[i] > 0);
 }
 
 static void test_encoder_position_velocity_and_direction_units(void)
@@ -290,9 +294,13 @@ static void test_stabilizer_correction_is_wheel_domain_and_bounded(void)
     int32_t target[WHEEL_COUNT] = {1000000, 1000000, 1000000, 1000000};
     int32_t measured[WHEEL_COUNT] = {0, 0, 0, 0};
     int32_t correction[WHEEL_COUNT] = {0};
+    int32_t yaw_err = 0;
 
+    /* [AI] R46: kd=0, deriv=0 → 纯 P 行为（与 R45 之前一致） */
     assert(wheel_control_stabilize(target, measured, 1000, &calibration,
-                                   50000U, 500U, correction));
+                                   50000U, 500U, correction,
+                                   &yaw_err, 0, 0U));
+    assert(yaw_err == 1000);
     assert(correction[0] == 50000);
     assert(correction[1] == -50000);
     assert(correction[2] == 50000);
@@ -300,10 +308,36 @@ static void test_stabilizer_correction_is_wheel_domain_and_bounded(void)
     for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
         assert(target[i] == 1000000 + correction[i]);
 
+    /* [AI] R46: D 项——误差 1000 mrad/s、微分 2000 mrad/s²、kd=150：
+       P=1000*150000/32500*500‰≈2.31e6, D=2000*150000/32500*150‰≈1.38e6,
+       合成 3.69e6 > 限幅 50000 → 仍满限幅，但符号随误差/微分同向。 */
+    int32_t target2[WHEEL_COUNT] = {1000000, 1000000, 1000000, 1000000};
+    int32_t correction2[WHEEL_COUNT] = {0};
+    assert(wheel_control_stabilize(target2, measured, 1000, &calibration,
+                                   50000U, 500U, correction2,
+                                   NULL, 2000, 150U));
+    assert(correction2[0] == 50000);
+    assert(correction2[1] == -50000);
+
+    /* [AI] R46: kd>0、微分反向 → 修正量低于纯 P（D 抵消瞬态）。
+       小误差场景：err=100 mrad/s → P≈1538; deriv=-2000, kd=150 → D≈-1.38e6,
+       合成负 → 钳位到 -50000（限幅内则应为负值）。 */
+    int32_t target3[WHEEL_COUNT] = {1000000, 1000000, 1000000, 1000000};
+    int32_t correction3[WHEEL_COUNT] = {0};
+    assert(wheel_control_stabilize(target3, measured, 100, &calibration,
+                                   50000U, 500U, correction3,
+                                   NULL, -2000, 150U));
+    assert(correction3[0] < 0);
+    assert(correction3[1] > 0);
+
+    /* [AI] R46: 非法标定 → 拒绝且清零（R30 起默认表合法，需本地构造非法表） */
+    wheel_calibration_t invalid_cal = signed_calibration();
+    invalid_cal.valid = 0U;
     memset(correction, 0x7F, sizeof(correction));
     assert(!wheel_control_stabilize(target, measured, 1000,
-                                    &car_wheel_calibration,
-                                    50000U, 500U, correction));
+                                    &invalid_cal,
+                                    50000U, 500U, correction,
+                                    NULL, 0, 0U));
     for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
         assert(correction[i] == 0);
 }
@@ -367,7 +401,7 @@ static void test_uptime_timestamp_extends_tick_wrap_monotonically(void)
 
 int main(void)
 {
-    test_default_calibration_is_unsigned_and_closed();
+    test_default_calibration_is_preloaded_and_valid();
     test_encoder_position_velocity_and_direction_units();
     test_command_conversion_uses_each_wheel_cpr();
     test_normalized_bench_target_does_not_apply_encoder_sign();

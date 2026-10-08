@@ -38,8 +38,16 @@
 
 #define ICM_LSB_PER_DPS  65.5f       /* ±500dps 额定 65.5（课设实测 65.2，可调） */
 #define ICM_Z_SIGN       (+1.0f)     /* Z 正方向=逆时针(ccw)；装反改 -1（手转板验证） */
-#define IMU_STILL_LSB    150.0f      /* 静止窗口范围阈值(raw LSB)；一次 ~90° 转弯约 2250 LSB */
+#define IMU_STILL_LSB    150.0f      /* 静止窗口范围阈值(raw LSB)；一次 ~90° 转弯约 2250 LSB。
+                                        [AI] R47 标定方法：看 imu_dbg_still_range——
+                                        真静止时该值应稳定在 20~60 LSB（12 位噪声底）；
+                                        若 >100 说明 EMI/振动把窗口撑大，阈值取
+                                        "静止典型值 ×3" 重新实测，勿拍脑袋 */
 #define IMU_STILL_MS     400U        /* 静止持续该时长后提交新零偏 */
+/* [AI] R47: 角速度一级 IIR（EMA α=1/4）。芯片 DLPF(44Hz) 之外的软件补充，
+   主要压编码器侧对比用的 100 Hz 采样噪声；稳态增益=1 不影响标定换算。
+   改大分母=更平滑但稳定器相位滞后增大，与轮级 D 项联动调。 */
+#define IMU_RATE_EMA_SHIFT 2         /* α = 1/2^2 = 1/4 */
 
 enum { CHIP_NONE = 0, CHIP_ICM = 1, CHIP_MPU = 2 };
 
@@ -58,6 +66,7 @@ static float    still_acc, still_min, still_max;
 volatile float    imu_dbg_bias_lsb;
 volatile float    imu_dbg_yaw_deg;
 volatile float    imu_dbg_rate_dps;
+volatile float    imu_dbg_still_range;   /* [AI] R47: 最近提交零偏窗口的 raw 峰谷范围——IMU_STILL_LSB 实测标定依据 */
 volatile uint8_t  imu_dbg_state;
 volatile uint32_t imu_dbg_fail_cnt;
 volatile uint8_t  imu_dbg_chip;     /* 诊断: 0=无 1=ICM20948 2=MPU6050 */
@@ -268,6 +277,7 @@ void imu_update(uint32_t now_ms, int still)
             still_acc += raw; still_n++;
             if ((uint32_t)(now_ms - still_t0) >= IMU_STILL_MS) {
                 gyro_bias = still_acc / (float)still_n;      /* 平窗 → 用真静止重定零偏 */
+                imu_dbg_still_range = still_max - still_min; /* [AI] R47: 静止噪声底实测值 */
                 still_t0 = now_ms ? now_ms : 1U;
                 still_acc = 0.0f; still_n = 0U;
                 still_min = raw; still_max = raw;
@@ -280,7 +290,9 @@ void imu_update(uint32_t now_ms, int still)
     float dt = (float)(uint32_t)(now_ms - yaw_last_ms) * 0.001f;
     yaw_last_ms = now_ms;
     if (dt > 0.1f) dt = 0.1f;                     /* 轮询间隙上限，防积分跳变 */
-    rate_dps_now = (raw - gyro_bias) / ICM_LSB_PER_DPS;
+    /* [AI] R47: 一级 IIR α=1/4——先滤波再积分/输出，稳定器与航向共用 */
+    rate_dps_now += ((raw - gyro_bias) / ICM_LSB_PER_DPS - rate_dps_now) *
+                    (1.0f / (float)(1U << IMU_RATE_EMA_SHIFT));
     yaw_now += ICM_Z_SIGN * rate_dps_now * dt;
 
     imu_dbg_bias_lsb = gyro_bias;
