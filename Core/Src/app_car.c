@@ -137,7 +137,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R43";   /* [AI] R43: 按钮生产化——短按=清急停锁存（锁存分支内处理，过 car_estop_clear 安全门）、长按=本地急停（25kHz 快速路径 + release_required），台架启动/麦轮自检的按钮触发移除，电机启动只走 USB/CAN 显式指令；R42: ARM 命令落地——v2 ARM_COMMAND(7轴µrad)→servo_set_pulse（轴序 J1..J6+夹爪→ch5..ch0 见 app_car.h），打开 arm_commissioned，axis 0~270°↔500~2500µs；R41: 舵机测试收官（R40 互切测试移除）；R39: 遥测 EMA；R38: encoder_sign kick 学习持久化；R37: 使能门放宽；R36: 反馈守卫只看采样时间戳；R35: 解 sample_time 死锁；R34: ARM 前置放宽；R33: 判向窗增量阈值；R32: 恢复 kick 判向；R31: 零位检查版二；R30: v2 轮标定表首填；R29: 舵机零位检查版；R28: CubeMX 全量迁移版 */
+const char build_tag[] = "R44";   /* [AI] R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;

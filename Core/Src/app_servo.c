@@ -25,14 +25,28 @@ void servo_init(void)
        （PSC=167/83 → 1MHz tick、ARR=19999 → 50Hz、各通道 Pulse=1500 中位、
        引脚 AF 已配），本层只重设中位（双保险）+ 启动 PWM 输出。
        高级定时器 TIM8 的 MOE 由 HAL_TIM_PWM_Start 置位。 */
+    /* [AI] R44: 上电默认位从 1500µs 中位改为 Home 安全位
+       （指令 J1=0° J2=225° J3=270° J4=0° J5=0° J6=0°，用户 2026-10-08 指定；
+       与 rak 仓 SRDF home group_state 一致）。
+       脉宽 = 500 + 指令角×2000/270（与 car_arm_command_urad 同一换算与取整）：
+       0°→500µs，225°→2166µs，270°→2500µs。单点定义见下表。 */
     static const uint32_t ch8[4] = {
         TIM_CHANNEL_1, TIM_CHANNEL_2, TIM_CHANNEL_3, TIM_CHANNEL_4 };
+    /* ch0=PC6=J6  ch1=PC7=J5  ch2=PC8=J4  ch3=PC9=J3  ch4=PB14=J2  ch5=PB15=J1 */
+    static const unsigned home_pulse[6] = {
+        500U,   /* J6 腕旋转 0°   */
+        500U,   /* J5 腕俯仰 0°   */
+        500U,   /* J4 小臂自旋 0° */
+        2500U,  /* J3 肘 270°     */
+        2166U,  /* J2 大臂 225°   */
+        500U,   /* J1 腰 0°       */
+    };
     for (unsigned k = 0; k < 4U; ++k) {
-        __HAL_TIM_SET_COMPARE(&htim8, ch8[k], SERVO_MID_US); /* PC6-9，防乱甩 */
+        __HAL_TIM_SET_COMPARE(&htim8, ch8[k], home_pulse[k]); /* PC6-9，防乱甩 */
         (void)HAL_TIM_PWM_Start(&htim8, ch8[k]);
     }
-    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, SERVO_MID_US);  /* PB14 */
-    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, SERVO_MID_US);  /* PB15 */
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, home_pulse[4]);  /* PB14=J2 */
+    __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, home_pulse[5]);  /* PB15=J1 */
     (void)HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1);
     (void)HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_2);
 }
