@@ -1,9 +1,12 @@
-> **两份副本约定**：本文件在 `vehical_rak_chassis` 与 `vehical_rak_arm` 各存一份，内容必须保持一致——改动时**同一批提交两个仓**（手工 cp 即可，没有同步工具）。
+# CAN 通信协议 v4（两端对接规范，规范性文档）
 
-# CAN 通信协议 v3（三端对接规范，规范性文档）
+适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘 F407（`vehical_rak_chassis`）。
+**这是两端的通信事实来源**：MCU 侧编解码、Jetson 侧编解码、以及本文的测试向量三者必须逐字节一致。任何一方改协议，必须先改 [`protocol-signals.yaml`](protocol-signals.yaml) 并重跑 `tools/can_check.py`。
 
-适用范围：Jetson（`rak`）↔ 底盘 F407（`vehical_rak_chassis`）↔ 机械臂 F407（`vehical_rak_arm`）。
-**这是三端唯一的通信事实来源**：MCU 侧的 `app_can.h`、Jetson 侧的编解码实现、以及本文的测试向量三者必须逐字节一致。任何一方改了协议，必须先改本文并重发测试向量。
+> **v4 相对 v3 的定位变化（2026-10-09 已定，不再开洞）**
+> 1. **CAN 是唯一主链路**：所有控制与遥测（安全门、4 轮速指令、7 轴舵机、全量遥测）全部走 CAN；**USB v2 串口降级为备用链路**，帧格式冻结不变（见 §10）。
+> 2. **单节点拓扑**：机械臂板已烧毁退役，v3 的底盘↔机械臂互锁层（`XFER_*`）整体作废。
+> 3. **控制契约沿用 ros2-control 架构**：4 轮速 + 7 轴（6 关节 + 1 夹爪）位置，麦轮 IK 在 Jetson 侧（见 `vehical_rak_chassis/docs/ROS2-CONTROL-ARCH.md`）。
 
 术语：**必须**=强制；**应**=强烈建议，偏离需写明理由；**可**=可选。
 
@@ -11,281 +14,235 @@
 
 ## 1. 物理层与拓扑
 
-- 单条总线，**CAN 2.0A（11 bit ID）**，**1 Mbps**，经典帧 8 字节。**不使用 CAN FD**——F407 的 bxCAN 不支持 FD，一帧 FD 会让两个 MCU 节点判为错误帧（`rak` 文档里"CAN FD"的表述待修正，见 §10）。
-- 三个节点全部挂同一条总线，**只有总线两个物理端点各接 120 Ω**（中间节点不接）。Jetson、两块 F407 的 **GND 必须互联**。
-- **两块 F407 用板载 CAN 收发器**，MCU 侧引脚固定 **PD0 = CAN1_RX、PD1 = CAN1_TX**（`docs/board-c30d.md` §2，出自板级资源 PDF）。⚠️ 设计草案里的 `CAN1_RX=PB8/CAN1_TX=PB9` **作废**——PB8/PB9 是电机 A 的两个驱动输入。
-- **Jetson 侧用外接模块**（Orin 板载 mttcan 控制器 `can0`，50 MHz 时钟，硬件支持 FD 但本项目**禁止启用 FD**）。
-  ⚠️ 用户计划的 **TJA1050 是 5 V 器件**，其 RXD 输出高电平约 VCC−0.5 V ≈ 4.25 V，而 Orin 的 GPIO/CAN 引脚是 3.3 V 域。落地前必须二选一：① 改用 **3.3 V 收发器**（SN65HVD230 / MCP2551+3.3V 逻辑侧 / TJA1050T 的 3.3 V 版本）；② 保留 TJA1050 但在 RXD→Orin 之间加电平移位。**不要直连赌它扛得住。**
-- 接线极性：CAN_H / CAN_L 不得反接；总线隐性电平 ≈2.5 V，显性 ≈ CAN_H 3.5 V / CAN_L 1.5 V。上电第一件事是用万用表量这两个电平，接错会表现为"偶发收不到帧"。
+- 单总线，**CAN 2.0A（11 bit ID）**，**1 Mbps**，经典帧 DLC=8。**禁用 CAN FD**（F407 bxCAN 不支持；Jetson mttcan 支持但必须保持关闭，`ip link` 不得带 `fd` 参数）。
+- 两个节点，**总线两个物理端点各 120 Ω**（Waveshare SN65HVD230 模块板载一颗，确认焊点闭合；底盘板端应补一颗）。
+- **两个节点 GND 必须互联**（第三根线）：差分接收器的共模参考。缺地时表现为"偶发收得到、大量 bus-off"的临界总线——2026-10-09 联调实测。
+- 底盘侧：板载收发器，**PD0=CAN1_RX、PD1=CAN1_TX**（`docs/board-c30d.md` §2）。1 Mbps 位时序 = PCLK1 42 MHz / BRP2 / 21 tq（BS1=16, BS2=4）= 精确 1.000 Mbps，采样点 81.0 %。**时钟必须来自 HSE 8 MHz**（用 HSI 会出现偶发 bus-off 玄学故障）。
+- Jetson 侧：mttcan（`c310000.mttcan`，50 MHz 时钟）+ 外置 **SN65HVD230**（3.3 V 器件，可直连 Orin）。
+  推荐配置：`ip link set can0 type can bitrate 1000000 sample-point 0.810 restart-ms 100`（采样点对齐底盘的 81 %，restart-ms 自动从 bus-off 恢复）。
+- ⚠️ **接线极性是历史事故点**：模块丝印与底盘端子标注可能不一致。上电先量隐性电平（H≈L≈2.5 V），通不上第一件事对调 H/L 试一次（2026-10-09 的根因就是对调后立即全通）。
 
-## 2. 位时序与时钟（最容易翻车的一处）
+## 2. 帧约定：raw8 与 e2e（v4 的关键简化）
 
-**两个 MCU 节点的 CAN 位时钟必须来自 HSE 8 MHz 晶振，不能是 HSI。**
+v3 给**所有**帧加应用层 counter+CRC8。v4 按 CAN 最佳实践收敛为两种布局：
 
-骨架当前是 HSI+PLL→168 MHz（`.ioc` 里 PH0/PH1 已配成外部晶振模式但时钟树没用）。HSI 的精度是百分比分级、随温度漂移，而 1 Mbps 下 CAN 对两端晶振总偏差的要求在几百 ppm 量级——**用 HSI 跑 1 Mbps 会出现"有时能通、偶发 bus-off"的玄学故障**，且难以定位。工程化第一步就是把时钟树切到 HSE（上一轮 H5–H7 也是用 HSE 的）。
+| 布局 | DLC | 内容 | 适用 |
+| --- | --- | --- | --- |
+| `raw8` | 8 | byte0..7 = 信号（小端、紧凑、总位宽 64 bit） | 除安全帧外的所有帧 |
+| `e2e` | 8 | byte0..5 信号（48 bit）+ byte6 `[7:4]counter\|[3:0]flags` + byte7 CRC8 | **仅 SAFETY_CMD** |
 
-推荐的 CAN1 位时序（PCLK1 = 42 MHz，采样点 85.7 %，符合 CiA 对 1 Mbps ≤87.5 % 的建议）：
+理由：
 
-| 参数 | 值 | 说明 |
-| --- | --- | --- |
-| 分频 BRP | 3 | 42 MHz / 3 = 14 MHz 位时钟 |
-| 同步段 | 1 tq | 固定 |
-| 段 1 (BS1) | 11 tq | |
-| 段 2 (BS2) | 2 tq | 采样点 = (1+11)/14 = 85.7 % |
-| SJW | 1 tq | |
-| 合计 | 14 tq/bit → **1.000 Mbps** | |
+1. CAN 2.0 帧本身带 **15 bit HW CRC + ACK + 自动重传**，对指令/遥测帧再加应用层 CRC 是伪保护（错误若穿透 HW CRC，大概率是系统性的，应用 CRC 也救不了），还把每帧载荷从 8 字节压缩到 6 字节。
+2. `SAFETY_CMD` 是唯一"损坏会造成物理后果"的帧（急停/启动），保留 **AUTOSAR E2E Profile 1 同构**的 4 bit counter + CRC8 + Data ID 种子。
+3. 指令流的"活性"不靠 counter，靠 **deadman 超时**（§6.2）；CAN 硬件保证帧不重复、不丢失（重传语义）。
 
-验收方法：① 三端各自 `ip -details link show can0` / OLED 显示 bus-off 计数为 0；② 连续跑 10 min 压力测试，`berr-counter` 不增长；③ 有条件时用示波器量 CANH-CANL 显性脉宽。
-
-## 3. 标识符规划（优先级即功能）
-
-11 bit ID 按"越小优先级越高"分配。**安全类帧的 ID 一定小于所有指令与反馈帧**，保证急停永远抢得到总线——这与草案"0x102 急停、0x300 节点间"的编号顺序相反，是 v3 最重要的一处修正。
-
-| 优先级 | ID | 名称 | 方向 | 周期 | Data ID |
-| --- | --- | --- | --- | --- | --- |
-| 1 安全 | `0x010` | `SAFETY_CMD` | Jetson→广播；节点也需监听 | 事件 | 0x01 |
-| 2 故障 | `0x020` | `EMCY_CHASSIS` | 底盘→广播 | 事件（10 ms 内首发，重发 3 次） | 0x02 |
-| 2 故障 | `0x021` | `EMCY_ARM` | 机械臂→广播 | 同上 | 0x03 |
-| 3 互锁 | `0x030` | `XFER_CH_TO_ARM` | 底盘→机械臂 | **1 kHz** | 0x04 |
-| 3 互锁 | `0x031` | `XFER_ARM_TO_CH` | 机械臂→底盘 | **1 kHz** | 0x05 |
-| 4 指令 | `0x100` | `CHASSIS_VEL_CMD` | Jetson→底盘 | 100 Hz | 0x06 |
-| 4 指令 | `0x101` | `ARM_JOINT_CMD_A` (J1-J3) | Jetson→机械臂 | 100 Hz | 0x07 |
-| 4 指令 | `0x102` | `ARM_JOINT_CMD_B` (J4+BASE) | Jetson→机械臂 | 100 Hz | 0x08 |
-| 5 反馈 | `0x200` | `CHASSIS_VEL_FB` | 底盘→Jetson | 100 Hz | 0x09 |
-| 5 反馈 | `0x201` | `CHASSIS_DIAG` | 底盘→Jetson | 10 Hz | 0x0A |
-| 5 反馈 | `0x210` | `ARM_JOINT_FB_A` (J1-J3) | 机械臂→Jetson | 100 Hz | 0x0B |
-| 5 反馈 | `0x211` | `ARM_JOINT_FB_B` (J4+BASE) | 机械臂→Jetson | 100 Hz | 0x0C |
-| 5 反馈 | `0x212` | `ARM_DIAG` | 机械臂→Jetson | 10 Hz | 0x0D |
-| 6 管理 | `0x230` | `NODE_INFO_CHASSIS` | 底盘→广播 | 上电 1 次 + 1 Hz | 0x0E |
-| 6 管理 | `0x231` | `NODE_INFO_ARM` | 机械臂→广播 | 上电 1 次 + 1 Hz | 0x0F |
-
-**与草案编号的映射**（便于对照旧文档，不代表兼容）：`0x100→0x100`、`0x101→0x101+0x102`（拆两帧）、`0x102→0x010`、`0x200→0x200+0x201`、`0x201→0x210+0x211+0x212`、`0x300→0x030`、`0x301→0x031`、`0x302→0x010` 的 sync 位。
-
-> 为什么关节指令拆成两帧：草案的 `0x101` 用 4×int16 占满 8 字节，既没有 CRC 位也没有计数器位，与草案自己"每帧必须 CRC8"的要求矛盾。v3 统一为"5 字节数据 + 1 字节 counter/flags + 1 字节 CRC"，所以每帧最多装 2 个 int16 + 1 个 uint16 或 3 个 int16（见 §5 打包规则）。**关节角因此 3+1 拆帧。**
-
-## 4. 通用帧结构（E2E 保护）
-
-所有帧的 DLC = 8，布局统一：
-
-| 字节 | 内容 |
-| --- | --- |
-| 0 … 5 | 信号数据（按各帧信号表，**小端**） |
-| 6 | **高 4 位 = Alive Counter（0-15 滚动）**，**低 4 位 = Flags**（按帧定义） |
-| 7 | **CRC8**，覆盖字节 0-6（含 counter/flags），**初值 = 本帧 Data ID**，多项式 0x07，无反射、无输出异或 |
+**CRC8（仅 e2e 帧）**：多项式 0x07，无反射、无最终异或，**初值 = 本帧 Data ID**（不是 CAN ID！），覆盖 byte0..6：
 
 ```c
-/* 参考实现（三端逐字等价；Jetson 侧 Python 同算法） */
-uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init) {
-    while (n--) { uint8_t c = *p++; c ^= init; init = c & 0x80 ? (c<<1)^0x07 : c<<1; }
-    /* 注意：上面这种写法错，用下面的标准逐位式 */
-    return init;
-}
-/* 正确版本 */
 uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
-    uint8_t crc = data_id;                     /* 初值 = Data ID */
+    uint8_t crc = data_id;
     for (uint8_t i = 0; i < len; i++) {
         crc ^= d[i];
         for (uint8_t b = 0; b < 8; b++)
             crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
     }
-    return crc;                                /* 无最终异或 */
+    return crc;
 }
 ```
 
-**字节序：一律 Intel / 小端**（低字节放在低地址字节）。理由：STM32 是小端机，可 `memcpy` 直接映射；ROS 侧手写编码不易错。⚠️ 这与上一轮"多字节字段大端"的口径**相反**——两端都还没有实现，现在统一成本最低，但任何从旧工程搬来的代码都要改。
+**字节序一律 Intel / 小端**。物理量↔整数换算一律 `round(物理值 / factor)`，饱和截断到范围端点，不取模、不回绕；两端各写"越界即拒绝发送并计数"的检查。
 
-**接收端校验顺序（强制）**：CRC 正误 → counter 是否 +1（允许 +0 视作重复帧丢弃）→ 是否跳变（跳变计入丢帧统计）→ 才更新应用数据。任一失败：丢弃该帧并累加错误计数，**绝不部分更新**。
+## 3. 标识符规划（优先级即功能）
 
-**Flags 低 4 位定义**
+11 bit ID 按"越小优先级越高"。**安全/管理帧 ID < 0x100 < 指令帧 < 反馈帧**，急停永远抢得到总线（`can_check.py` 强制校验此规则）。
 
-| 帧族 | bit0 | bit1 | bit2 | bit3 |
+| ID | 名称 | 方向 | 周期 | Data ID | 布局 |
+| --- | --- | --- | --- | --- | --- |
+| `0x010` | `SAFETY_CMD` | Jetson→广播 | 事件 | 0x01 | e2e |
+| `0x020` | `EMCY` | 底盘→广播 | 事件（10 ms 内首发，重发 3 次） | 0x02 | raw8 |
+| `0x030` | `NODE_INFO` | 底盘→广播 | 上电 1 次 + 1 Hz | 0x03 | raw8 |
+| `0x100` | `DRIVE_CMD` | Jetson→底盘 | 100 Hz | 0x04 | raw8 |
+| `0x110` | `ARM_CMD_A` (J1-J4) | Jetson→底盘 | 50 Hz | 0x05 | raw8 |
+| `0x111` | `ARM_CMD_B` (J5,J6,夹爪) | Jetson→底盘 | 50 Hz | 0x06 | raw8 |
+| `0x200` | `WHEEL_POS_A` (W1,W2) | 底盘→Jetson | 100 Hz | 0x07 | raw8 |
+| `0x201` | `WHEEL_POS_B` (W3,W4) | 底盘→Jetson | 100 Hz | 0x08 | raw8 |
+| `0x202` | `WHEEL_SPD` (W1-W4) | 底盘→Jetson | 100 Hz | 0x09 | raw8 |
+| `0x210` | `SERVO_STATE_A` (J1-J4) | 底盘→Jetson | 50 Hz | 0x0A | raw8 |
+| `0x211` | `SERVO_STATE_B` (J5,J6,夹爪) | 底盘→Jetson | 50 Hz | 0x0B | raw8 |
+| `0x220` | `DIAG` | 底盘→Jetson | 10 Hz | 0x0C | raw8 |
+
+### 带宽核算（1 Mbps，经典帧含填充约 110–130 µs/帧）
+
+| 方向 | 帧率 | 来源 |
+| --- | --- | --- |
+| 下行 | 100 + 2×50 = 200 fps | DRIVE 100Hz + ARM 2×50Hz |
+| 上行 | 3×100 + 2×50 + 10 + 1 = 361 fps | 轮位×2 + 轮速 + 舵机×2 + DIAG + NODE_INFO |
+| 合计 | **~561 fps ≈ 总线负载 7 %** | 死区余量 >10 倍，未来扩展（IMU、电流估计）有空间 |
+
+## 4. 帧信号表
+
+| 帧 | byte0-1 | byte2-3 | byte4-5 | byte6-7 |
 | --- | --- | --- | --- | --- |
-| 指令帧 | enable（1=允许执行） | 限速档（0=高限/1=低限） | 保留 | 保留 |
-| 状态帧 | mode bit0 | mode bit1 | estop 锁存 | fault 有效 |
-| `SAFETY_CMD` | 命令码 bit0-3（见 §7） | | | |
-
-mode（2 bit，状态帧）：`0=IDLE`、`1=REMOTE`、`2=ESTOP`、`3=FAULT`。
+| `0x100 DRIVE_CMD` | `W1SPD` | `W2SPD` | `W3SPD` | `W4SPD` |
+| `0x110 ARM_CMD_A` | `J1ANG` | `J2ANG` | `J3ANG` | `J4ANG` |
+| `0x111 ARM_CMD_B` | `J5ANG` | `J6ANG` | `GRIP` | 保留=0 |
+| `0x200 WHEEL_POS_A` | `W1POS` (i32) | | `W2POS` (i32) | |
+| `0x201 WHEEL_POS_B` | `W3POS` (i32) | | `W4POS` (i32) | |
+| `0x202 WHEEL_SPD` | `W1SPD` | `W2SPD` | `W3SPD` | `W4SPD` |
+| `0x210 SERVO_STATE_A` | `J1ANG` | `J2ANG` | `J3ANG` | `J4ANG` |
+| `0x211 SERVO_STATE_B` | `J5ANG` | `J6ANG` | `GRIP` | 保留=0 |
+| `0x220 DIAG` | `BAT_MV` | `FAULT` | `STATE` | `MODE` u8 + `BUSOFF_CNT` u8 |
+| `0x030 NODE_INFO` | `PROTO` u8 + `HWREV` u8 | `BUILD` u16 | `FAULT` | `STATE` |
+| `0x020 EMCY` | `FAULT` | `AUX` | `STATE` | 保留=0 |
+| `0x010 SAFETY_CMD` | `CMD` u16（低 4 位有效） | 保留=0 | 保留=0 | counter/flags=0 + CRC |
 
 ## 5. 信号定义与量化
 
-| 信号 | 位宽 | 类型 | factor | 范围 | 单位 | 说明 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `VX`, `VY` | 16 | int16 | 1 | −32768…32767 | **mm/s** | 车体系速度；X 前 Y 左 |
-| `WZ` | 16 | int16 | **0.001** | ±32.768 | **rad/s** | 逆时针为正。⚠️ 草案是 0.01（分辨率 0.57 °/s，太粗），v3 改 0.001 |
-| `J1..J4_POS` | 16 | int16 | **0.01** | ±327.67 | **度** | 关节角，单圈关节够用；比 0.1° 精细，仍不溢出 |
-| `BASE_POS` | 16 | **uint16** | **0.01** | 0…655.35 | **度** | 底座 360° 连续旋转，无符号才能覆盖 |
-| `BAT_MV` | 16 | uint16 | 1 | 0…65535 | mV | 电池电压（PB0 分压换算） |
-| `FAULT_CODE` | 16 | uint16 | — | 见 §8 | — | 0 = 无故障 |
-| `WHEEL_RPM` | 8 ×4 | uint8 | 10 | 0…2550 | rpm | 每路一轮，低分辨率足够遥测 |
-| `STATE_u16` | 16 | uint16 | — | 位图 | — | `bit0 homed`、`bit1 homing_active`、`bit2-3 mode`、`bit4 estop_latched`、`bit5 holding`（臂在主动锁位）、`bit6 stepper_mismatch`、`bit7 cmd_stale`（见 `protocol-signals.yaml` 的 `state_bits`） |
-| `PROTO_VER` | 8 | uint8 | — | — | — | 本协议版本，本文档 = **3** |
-
-**打包规则**：同一帧内信号按表顺序从字节 0 起紧凑排列，小端；不得跨帧共享信号；不得在帧内留空洞（未用位填 0）。
-
-**编码约定**：物理量与整数的换算一律 `round(物理值 / factor)`，饱和截断到范围端点，**不取模、不回绕**。三端各写一个"越界即拒绝发送并计数"的检查，不要靠下游发现。
-
-## 6. 帧信号表
-
-| 帧 | 字节 0-1 | 2-3 | 4-5 | 字节 6 | 字节 7 |
+| 信号 | 位宽 | factor | 范围 | 单位 | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `0x100 CHASSIS_VEL_CMD` | `VX` | `VY` | `WZ` | counter/flags(enable, 限速) | CRC |
-| `0x101 ARM_JOINT_CMD_A` | `J1_POS` | `J2_POS` | `J3_POS` | counter/flags(enable) | CRC |
-| `0x102 ARM_JOINT_CMD_B` | `J4_POS` | `BASE_POS` | 保留=0 | counter/flags(enable) | CRC |
-| `0x200 CHASSIS_VEL_FB` | `VX`实测 | `VY`实测 | `WZ`实测 | counter/flags(mode/estop/fault) | CRC |
-| `0x201 CHASSIS_DIAG` | `BAT_MV` | `FAULT_CODE` | **`STATE_u16`**（位图） | counter/flags | CRC |
-| `0x210 ARM_JOINT_FB_A` | `J1_POS`实测 | `J2` | `J3` | counter/flags | CRC |
-| `0x211 ARM_JOINT_FB_B` | `J4`实测 | `BASE_POS`实测 | 保留=0 | counter/flags | CRC |
-| `0x212 ARM_DIAG` | `BAT_MV` | `FAULT_CODE` | **`STATE_u16`** | counter/flags | CRC |
-| `0x030 XFER_CH_TO_ARM` | `VX`实测 | `VY`实测 | `WZ`实测 | counter/flags | CRC |
-| `0x031 XFER_ARM_TO_CH` | `FAULT_CODE` | `J4_POS`实测 | `BASE_POS`实测 | counter/flags | CRC |
-| `0x010 SAFETY_CMD` | `CMD_CODE`（见 §7） | 保留=0 | 保留=0 | counter/flags=0 | CRC |
-| `0x020/0x021 EMCY_*` | `FAULT_CODE` | `FAULT_AUX`（首个出错通道号等） | 保留=0 | counter/flags | CRC |
-| `0x230/0x231 NODE_INFO` | `PROTO_VER`+`HW_REV`（打包 16 bit） | `BUILD_HASH`（固件 tag 的 CRC16 或 git short hash 转 uint16） | 保留=0 | counter/flags | CRC |
+| `WxSPD` | 16 int16 | **0.01** | ±327.67 | **rad/s** | 轮角速度（前转正）。覆盖 ±327 rad/s，分辨率 10 mrad/s ≈ 0.33 mm/s 轮面速度（r=0.0325 m），远低于 25 kHz 闭环的死区 |
+| `WxPOS` | 32 int32 | 1 | 全范围 | counts | 编码器累计位置，**上电=0**，里程计唯一来源。int32 在最大转速下回绕周期 > 年级，无需回绕处理 |
+| `JxANG`/`GRIP` | 16 uint16 | **0.1** | 0…2700 (0…270°) | deg | 舵机角。0.1° 对齐舵机 PWM 物理分辨率（7.4 µs/° ≈ 0.07°），0.01° 是伪精度；全部无符号（0-270° 行程，Home 位见 §6.4） |
+| `BAT_MV` | 16 uint16 | 1 | 0…65535 | mV | 电池电压。**欠压阈值 10500 mV**（实测定的硬约束） |
+| `FAULT` | 16 uint16 | — | 见 §7 | — | 0 = 无故障 |
+| `STATE` | 16 uint16 | — | 位图 | — | `bit0 estop_latched`、`bit1 remote_running`、`bit2 fault_active`、`bit3 cmd_stale`、`bit4 bat_uv`、`bit5 can_recovering`、bit6-15 保留 |
+| `MODE` | 8 uint8 | — | mode 枚举 | — | 0 IDLE / 1 REMOTE / 2 ESTOP / 3 FAULT |
+| `BUSOFF_CNT` | 8 uint8 | 1 | 0…255（饱和） | — | bus-off 累计计数，健康度指标 |
+| `PROTO`/`HWREV`/`BUILD` | 8/8/16 | — | — | — | 协议版本（本文=4）/ 硬件版本 / git short hash 折 16 位 |
 
-**`0x031` 里为什么放 J4/BASE**：底盘需要的是"臂是否伸出、伸出多少"用于稳定性互锁，不需要 1 kHz 的全 4 关节；`XFER_ARM_TO_CH` 用 1 kHz 传故障 + 最影响质心的两个量。这是我对草案"1 kHz 全量互发"做的裁剪，**理由与代价见 §9 待确认 #4**。
+轮序 `W1..W4` 与编码器通道 `TIM2/3/4/5` 一一对应（`app_car.c` 单点定义）；关节序 `J1..J6` 对应舵机通道 `ch0..ch5`（固件轴序 J1..J6+夹爪 → ch5..ch0，`app_car.h` 单点定义）。
 
-## 7. 网络管理、模式机与安全动作
+## 6. 网络管理、模式机与安全动作
 
-### 7.1 `SAFETY_CMD`（ID 0x010，广播）
+### 6.1 `SAFETY_CMD`（ID 0x010，e2e 帧广播）
 
-`CMD_CODE`（uint16，低 4 位有效）：
+`CMD` 低 4 位有效：
 
 | 值 | 命令 | 效果 |
 | --- | --- | --- |
-| 0x1 | `START` | IDLE/FAULT→REMOTE（前提是 estop 已清、使能开关有效） |
-| 0x2 | `STOP` | 受控减速到 IDLE（可被 START 恢复） |
-| 0x4 | `EMERGENCY_STOP` | **立即锁存急停**：底盘动态刹车；**机械臂进入 `ESTOP_HELD` —— 持续闭环主动锁住当前关节角，不断使能**（已确认：臂断电会回落）。只停止接受新的运动目标 |
-| 0x5 | `CLEAR_ESTOP` | 解除急停锁存 → IDLE（不自动进 REMOTE） |
-| 0x6 | `CLEAR_FAULT` | 故障复位（仅当故障条件已消失；否则保持 FAULT） |
-| 0x7 | `SOFT_RESET` | 节点自复位（`NVIC_SystemReset`），复位后仍保持急停锁存与未 homed 状态 |
-| 0x8 | `HOME_REQUEST` | **请求零位标定**（低速单向堵转找死点）。这是唯一允许节点自主运动的初始化途径；必须同时满足 `enable=1` + 使能开关有效，且建议人工在旁（见 §7.5） |
-| 0x9 | `RELEASE_HOLD` | 解除锁位、断使能。**仅在臂处于已 parked 姿态或人工支撑时发**；否则会造成回落砸物（`STATE.bit5 holding` 会如实回报） |
+| 0x1 | `START` | IDLE/FAULT(已复位)→REMOTE（前提 estop 已清） |
+| 0x2 | `STOP` | 受控减速到 IDLE（可 START 恢复） |
+| 0x4 | `EMERGENCY_STOP` | **立即锁存急停**：25 kHz ISR 下一周期（≤40 µs）执行四轮动态刹车 |
+| 0x5 | `CLEAR_ESTOP` | **规范保留**。⚠️ 固件（R43 起生产语义）**故意不实现 CAN 清除**——清急停必须**物理短按按钮**（确认人在车边）。收到即丢弃 |
+| 0x6 | `CLEAR_FAULT` | 故障复位（仅当故障条件已消失） |
+| 0x7 | `SOFT_RESET` | `NVIC_SystemReset`；急停锁存**跨复位保持** |
 
-- **急停路径不经过 100 Hz 任务**：`0x010` 在 CAN 接收中断里置标志，25 kHz ISR 下一个周期（≤40 µs）就执行刹车/锁位。全链路响应预算 **≤1 ms**。
-- **急停是锁存的**，只有 `CLEAR_ESTOP` 能解除；看门狗复位、软复位都不得清除它（放到 RTC 备份寄存器或复位后备 RAM，并在 `NODE_INFO`/`DIAG` 里回报锁存状态）。
-- ⚠️ **锁位不是免费的**：`ESTOP_HELD` 下堵转电流会长期流过电机与 AT8236（本板**无电流采样**，只能靠占空比/温度模型估算），因此锁位状态**应限时**（建议 ≤30 s，超时转 `FAULT` 并上报，同时提示人工介入），而不是无限期硬抱。
+- **急停路径不经过任务调度**：`0x010` 在 CAN 接收中断里校验 CRC（DID 种子）→ 置标志 → 25 kHz ISR ≤40 µs 执行刹车。全链路响应预算 **≤1 ms**。
+- **CRC 校验失败 / CMD 非法**：丢弃并计数，绝不部分执行。
 
-### 7.2 生命期（deadman）与超时——**两个节点动作不同**，这是 v3 与草案的另一处修正
+### 6.2 deadman 与超时
 
 | 监视方 | 被监视 | 时限 | 超时动作 |
 | --- | --- | --- | --- |
-| 底盘 | `0x100` 指令流 | **100 ms** | 目标速度置零，按 ≤`DECEL_LIMIT`（建议 3000 mm/s²）减速停 → IDLE |
-| 机械臂 | `0x101`/`0x102` 指令流 | **100 ms** | **保持当前关节位置**（不回落、不回零），持续闭环 |
-| 机械臂 | `0x030`（底盘互锁帧） | **10 ms** | 底盘失联 → 进入 FAULT 并锁存（臂不依赖底盘姿态，但互锁要求可见） |
-| 底盘 | `0x031`（臂互锁帧） | **10 ms** | 记录臂故障，若臂报 FAULT 则限制自身速度档 |
-| Jetson | `0x200`/`0x210` 反馈流 | **200 ms** | 判节点失联：冻结 Nav2/MoveIt 输出，发 `STOP`，UI 报警 |
+| 底盘 | `DRIVE_CMD` 流 | **100 ms** | 轮速目标清零，受控减速停 → IDLE，`STATE.bit3 cmd_stale=1` |
+| 底盘 | `ARM_CMD_A/B` 流 | **100 ms** | **舵机保持当前位置**（不回 Home、不断使能） |
+| Jetson | `DIAG`/`NODE_INFO` 流 | **200 ms** | 判节点失联：冻结 ros2_control 输出、发 `STOP`、UI 报警 |
 
-理由：**用户已确认臂断电/停机会回落**（MG513P30 + 30:1、无抱闸）。所以"停"对臂而言等于"掉下来"——草案给两者都写"自动停止"是错的。臂的所有降级动作都必须是**保持闭环锁位**，真正的释放只能由 `RELEASE_HOLD` 显式触发。
+上电行为（强制）：**IDLE、电机不驱动、舵机直接输出 Home 安全位**（R44 语义：500/2166/2500/500/500/500 µs = 指令 0/225/270/0/0/0°），发一帧 `NODE_INFO`。电机启动只有显式 `START` + `DRIVE_CMD` 路径。
 
-### 7.5 零位标定（homing）——机械臂唯一的位基建立途径
+### 6.3 模式机
 
-硬件现实（用户确认）：**执行器只有 WHEELTEC MG513P30_12V，没有限位开关、没有绝对值编码器、没有电流采样**。所以零点只能靠**低速堵转撞到机械死点**建立：初始时那个死点位置是卡死的，能确定它就是 0；但一旦初始化完再次撞同一点，不能默认它仍是零位（必须单向趋近）。
+```
+IDLE --START--> REMOTE --STOP/断流--> IDLE
+  |                |
+  +--ESTOP(锁存)---+--ESTOP(锁存)      ESTOP --按钮短按--> IDLE
+  |                |
+  +--FAULT--+ <----+                    FAULT --CLEAR_FAULT(条件消失)--> IDLE
+```
 
-流程（强制，写进固件状态机）：
+### 6.4 与 USB v2 的语义对照（迁移表）
 
-1. **方向性**：零位标定只能从**同一侧**趋近死点（消除 30:1 减速箱齿隙引入的迟滞误差）；回程重新趋近时必须先退回安全角度再多走一段补偿量（建议 ≥ 实测齿隙迟滞带宽，需标定）。
-2. **低速低压**：堵转阶段速度上限建议 ≤ 50 计数/ms、占空比上限 ≤ 40 %（**具体值必须实测**：目标是能撞死但不顶坏结构件）。
-3. **堵转判定**（无电流采样，只能用间接判据）：同一轴占空比已达上限、但 1 ms 窗速度增量连续低于阈值，持续 ≥ `HOMING_STALL_MS`（建议 300 ms）→ 判定到位；随即停止该轴并将当前位置记为 0。
-4. **超时即失败**：单轴在 `HOMING_TIMEOUT_MS`（建议 5 s）内未堵转 → `FAULT` + `EMCY(0x0052)`，**不得自行重试**，也不得把当前点当零位。
-5. **未 homed 就禁止 REMOTE**：`STATE.bit0 homed = 0` 时，任何 `START` 都应被拒绝并报 `0x0053`；`SOFT_RESET`/看门狗复位后 `homed` 必须置回 0（零位不能存在 Flash 里当永久真值——齿隙与机械变动会让它骗人）。
-6. **底盘不做 homing**：底盘只需上电把当前轮位当里程计原点（相对零位），没有绝对位置需求。
+| USB v2 能力 | CAN v4 对应 | 差异说明 |
+| --- | --- | --- |
+| HELLO/feature 协商 | 无需（协议版本由 `NODE_INFO.PROTO` 静态声明） | CAN 无会话概念 |
+| 序号窗口/重传 | 无需（CAN HW 重传） | |
+| lease 看门狗 200 ms | `DRIVE_CMD` deadman 100 ms | CAN 周期流更密，超时更严 |
+| `DRIVE_COMMAND` 4×int32 urad/s | `DRIVE_CMD` 4×int16 ×0.01 rad/s | 精度 10 mrad/s 足够；Jetson 侧负责换算 |
+| `ARM_COMMAND` 7×int32 µrad | `ARM_CMD_A/B` 7×uint16 ×0.1° | 对齐舵机物理分辨率，Jetson 侧换算 |
+| 遥测 DRIVE_STATE 100 Hz | `WHEEL_POS_A/B` + `WHEEL_SPD` @100 Hz | 位置 int32 counts，语义等价 |
+| 遥测 SERVO/诊断 | `SERVO_STATE_A/B` @50 Hz + `DIAG` @10 Hz | |
+| 安全三命令 | `SAFETY_CMD` | CAN 版 e2e 保护 |
 
-### 7.3 上电与使能顺序（强制）
-
-1. 上电后节点一律进 `IDLE`，**输出为零、电机不驱动**，发一帧 `NODE_INFO`；机械臂额外要求 `homed=0`；
-2. 只有在板载使能开关（PD3）有效 + 收到 `START` + 指令帧 `enable=1` 三者同时成立，才允许进入 `REMOTE`；**机械臂额外多一个前置条件：`homed=1`**（先 `HOME_REQUEST` 再 `START`）；
-3. `REMOTE` 下若 `enable` 位从 1→0，按 `STOP` 处理（底盘受控减速；臂保持锁位）；
-4. 任何自检失败（编码器无变化、CAN bus-off、电压欠压）→ `FAULT` + `EMCY`。
-
-### 7.4 时间同步
-
-不做硬时基同步（1 Mbps + FreeRTOS 抖动无法保证同拍）。`0x010` 的 sync 语义仅用于"同时开始/同时停止"这类粗对齐；两板 1 kHz 互发本身即互相可见时标。**Jetson 侧对每帧记录内核接收时间戳**，用于端到端延迟与丢帧核算（目标：单向 <1 ms）。
-
-## 8. 故障码（`FAULT_CODE`，uint16）
+## 7. 故障码（`FAULT_CODE`，uint16）
 
 | 码 | 名称 | 触发条件 | 动作 |
 | --- | --- | --- | --- |
 | 0x0000 | NONE | — | — |
 | 0x0010 | ENC_STALL | 占空比 >50 % 持续 500 ms 而编码器增量 <阈值 | FAULT，停该通道 |
 | 0x0011 | ENC_JUMP | 单 1 ms 窗速度突变量 >2× 上限 | FAULT |
-| 0x0012 | ENC_NO_SIGNAL | 上电自检时四路编码器计数全零 | FAULT，禁止 REMOTE |
-| 0x0020 | CAN_BUS_OFF | bxCAN 进入 bus-off | 自动重入网（`restart-ms`），累计计数入 DIAG |
-| 0x0021 | CAN_CRC | 连续 20 帧 CRC 错 | 降速档 + 报 DIAG |
-| 0x0030 | BAT_UV | 电池 <10.5 V（12 V 系统，**待按实际电池曲线定**） | 禁止峰值输出，限速档 |
+| 0x0012 | ENC_NO_SIGNAL | 上电自检四路编码器计数全零 | FAULT，禁止 REMOTE |
+| 0x0020 | CAN_BUS_OFF | bxCAN 进入 bus-off | 自动重入网（restart-ms），累计计数入 `BUSOFF_CNT` |
+| 0x0030 | BAT_UV | 电池 <**10500 mV**（实测硬约束） | 禁止 ARMED 轮命令（安全层拒绝），`STATE.bit4=1` |
 | 0x0031 | BAT_OV | >16 V | FAULT |
-| 0x0040 | LOOP_OVERRUN | 25 kHz ISR 占用 >70 % 或丢拍 | FAULT（这是实时性红线） |
-| 0x0050 | JOINT_LIMIT | 关节超软件限位（机械臂） | 该轴停止，全臂 FAULT |
-| 0x0051 | STEP_STALL | 步进已发脉冲但位置无变化（机械臂底座） | 该轴 FAULT |
-| 0x0052 | HOMING_FAIL | 零位标定超时未堵转（§7.5 第 4 条） | FAULT，`homed` 保持 0，禁止 REMOTE |
-| 0x0053 | NOT_HOMED | 未做零位标定就 `START`（机械臂） | 拒绝，回 `IDLE` |
-| 0x0054 | HOLD_TIMEOUT | `ESTOP_HELD` 锁位超过限时（建议 30 s） | 转 FAULT 并提示人工介入（不断使能） |
-| 0x0060 | ESTOP_LATCHED | 急停锁存中 | 见 §7.1 |
+| 0x0040 | LOOP_OVERRUN | 25 kHz ISR 占用 >70 % 或丢拍 | FAULT（实时性红线） |
+| 0x0060 | ESTOP_LATCHED | 急停锁存中 | 见 §6.1 |
 
-⚠️ 草案里的"电流保护 / 过流检测"**没有硬件依据**：本板没有任何通道电流采样通道（`docs/board-c30d.md` §3）。v3 用 `ENC_STALL`（占空比高 + 编码器不动）做等效判据。真需要电流保护，得在预留 ADC（PC4/PA4/PA5）上加检流电阻并标定，那是硬件改动。
+## 8. 一致性测试向量（两端必须复现）
 
-## 9. 一致性测试向量（三端必须复现）
-
-单一来源：[`protocol-signals.yaml`](protocol-signals.yaml)（机器可读信号库）。下表由 ``../tools/can_check.py``（路径在工作区根，本仓不包含） 用参考实现**实际编码得出**（已运行验证，非手推）：
+单一来源：[`protocol-signals.yaml`](protocol-signals.yaml)。下表由 [`../tools/can_check.py`](../tools/can_check.py) 参考实现**实际编码得出**（`--update` 已回写，幂等）：
 
 | # | 帧 | ID | 输入 | 8 字节（hex） |
 | --- | --- | --- | --- | --- |
-| V1 | `CHASSIS_VEL_CMD` | `0x100` | Vx=500、Vy=−200、ωz=150（=0.150 rad/s）、enable=1、counter=0 | `F4 01 38 FF 96 00 01 60` |
-| V2 | `ARM_JOINT_CMD_A` | `0x101` | J1=10.00°、J2=−5.00°、J3=2.50°、enable=1、counter=1 | `E8 03 0C FE FA 00 11 21` |
-| V3 | `CHASSIS_VEL_FB` | `0x200` | 实测 Vx=498、Vy=−203、ωz=149、mode=REMOTE、counter=12 | `F2 01 35 FF 95 00 C1 52` |
-| V4 | `SAFETY_CMD` | `0x010` | CMD=EMERGENCY_STOP(4)、counter=5 | `04 00 00 00 00 00 50 1D` |
-| V5 | `XFER_ARM_TO_CH` | `0x031` | fault=0x0051、J4=−12.34°、BASE=360.00°、counter=15、flags=0x9 | `51 00 2E FB A0 8C F9 BF` |
-| V6 | `NODE_INFO_CHASSIS` | `0x230` | proto=3/hw=1、build=0xABCD、counter=0 | `01 03 CD AB 00 00 00 5C` |
+| V1 | `SAFETY_CMD` | `0x010` | CMD=EMERGENCY_STOP(4)、counter=5 | `04 00 00 00 00 00 50 1D` |
+| V2 | `EMCY` | `0x020` | fault=0x30、aux=1、state=0x0005 | `30 00 01 00 05 00 00 00` |
+| V3 | `NODE_INFO` | `0x030` | proto=4、hw=1、build=0xABCD、state=0x0001 | `04 01 CD AB 00 00 01 00` |
+| V4 | `DRIVE_CMD` | `0x100` | W1=+5.00、W2=−2.00、W3=+5.00、W4=−2.00 rad/s | `F4 01 38 FF F4 01 38 FF` |
+| V5 | `ARM_CMD_A` | `0x110` | J1=0°、J2=225°、J3=270°、J4=0°（Home 位） | `00 00 CA 08 8C 0A 00 00` |
+| V6 | `ARM_CMD_B` | `0x111` | J5=0°、J6=0°、GRIP=90° | `00 00 00 00 84 03 00 00` |
+| V7 | `WHEEL_POS_A` | `0x200` | W1=100000、W2=−50000 counts | `A0 86 01 00 B0 3C FF FF` |
+| V8 | `WHEEL_POS_B` | `0x201` | W3=123456789、W4=−1 counts | `15 CD 5B 07 FF FF FF FF` |
+| V9 | `WHEEL_SPD` | `0x202` | W1=W2=1.20、W3=W4=−0.80 rad/s | `78 00 78 00 B0 FF B0 FF` |
+| VA | `SERVO_STATE_A` | `0x210` | J1=0°、J2=225°、J3=270°、J4=0° | `00 00 CA 08 8C 0A 00 00` |
+| VB | `SERVO_STATE_B` | `0x211` | J5=0°、J6=0°、GRIP=90° | `00 00 00 00 84 03 00 00` |
+| VC | `DIAG` | `0x220` | bat=11100 mV、mode=REMOTE、state=0x0003 | `5C 2B 00 00 03 00 01 00` |
 
-向量里的数值是**原始整数**（raw），物理值 = raw × factor（例：V1 的 ωz raw=150、factor=0.001 → 0.150 rad/s）。
+向量里的数值是**原始整数**（raw），物理值 = raw × factor。
 
 ### 校验器就是门禁
 
 ```bash
-python3 tools/can_check.py            # 结构校验 + 向量比对 + CRC 篡改负例，失败退出码 1
-python3 tools/can_check.py --update   # 协议改动后回写 expect（已验证幂等）
-python3 tools/can_check.py --c-header # 生成两个 MCU 工程共用的 docs/gen/can_protocol.h
+python3 tools/can_check.py            # 结构校验 + 向量比对 + e2e CRC 负例，失败退出码 1
+python3 tools/can_check.py --update   # 协议改动后回写 expect（幂等）
+python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_protocol.h
 ```
 
-已实测的行为：改乱任意一条 `expect` → 退出码 1 并指 出差异；逐字节篡改帧内容 → CRC 必失败（负例检查）；协议字段改后 `--c-header` 重生成，C 端的 ID/Data ID/周期宏自动跟着变。**任何一方单独“顺手改协议”都会在 CI 上抖出来，而不是上线后才发现对不上。**
+必测边界用例（两端各自跑）：负数饱和、int32 回绕前后值、轮速 0.01 rad/s 分辨率舍入、保留位非零拒收、`SAFETY_CMD` CRC 篡改拒收（**已有实测**：2026-10-09 联调中 CRC 用错 DID 种子的急停帧被固件正确丢弃）。
 
-必测的边界用例（三端各自跑）：负数饱和（Vx=−40000 → 截断到 −32768 并计一次越界）、counter 回绕（15→0）、CRC 错 1 位、重复帧（同 counter）、跳帧（+2）、`BASE_POS=65535`（655.35°）、`WZ` 符号、保留位非零（应拒收）。
+## 9. 实测基线（2026-10-09 首次联调，v3 帧格式）
+
+- Jetson can0（mttcan + SN65HVD230）↔ 底盘 R44，1 Mbps：上行 `0x030`@1kHz + `0x200`@100Hz + `0x230` 连续 3 秒无错帧，counter 连续、CRC 全对。
+- 下行急停帧（CRC 合法）经 SWD 读 RAM 验证：`estop_latched=1`、`mode=ESTOP`，落入 25 kHz ISR 快速路径。
+- 根因记录：CANH/CANL 某一端反接 → 全哑 + 临界抖动；对调后全通。
+- **v4 帧格式尚未有固件实现**（见 §10 待办），上表 v4 向量是规范值，待 R45 上板后按 §8 边界用例复测。
 
 ## 10. 已定决定与待办
 
-### 10.1 用户 2026-10-02 已定（不再开洞）
+### 10.1 已定（2026-10-09，用户拍板）
 
-| # | 决定 | 写进哪里的哪一节 |
-| --- | --- | --- |
-| 1 | **底盘全向运动**：前后左移右移 + 自转，**且允许三者同时非零**（斜走、边走边转） | `0x100` 的 `VY` 有效（§5）；MCU 侧必须做**矢量饱和等比缩放**（§10.2-1） |
-| 2 | **航向权威源 = Jetson 的 LSM6DSRTR（SPI）**；两块 F407 不读板载 ICM20948（硬件存在，PB10/11/12，但不用） | MCU 不做姿态/航向（architecture.md §1）；帧里**不加 yaw 字段** |
-| 3 | **臂断电会回落** → 所有降级动作 = 主动锁位，释放只能 `RELEASE_HOLD` 显式触发 | §7.1/§7.2/§7.5、故障码 `0x0054` |
-| 4 | **零位只能靠低速堵转撞死点建立**（无开关、无绝对编码器） | 新增 `HOME_REQUEST` + §7.5 流程 + `STATE.bit0 homed` + 故障码 `0x0052/0x0053` |
-| 5 | **Jetson 侧收发器 = TJA1050**（外置模块） | §10.3 带电平警告 |
-| 6 | 夹爪驱动、步进驱动器型号与反馈：**推迟**（不阻塞 4 个关节的 Phase B） | 记在 ``vehical_rak_arm/README.md``（路径在工作区根，本仓不包含） §4 |
-| 7 | 电源系统（欠压门限等）：**不用管** | `0x0030/0x0031` 保留但门限暂不启用（先只报 DIAG 不触发 FAULT） |
+| # | 决定 |
+| --- | --- |
+| 1 | **CAN 全面接管**：安全、驱动、舵机、遥测全走 CAN；USB v2 串口冻结为备用（不删代码，不再演进） |
+| 2 | 指令编码按 CAN 最佳实践重设计（int16 量化 + raw8 无应用层 CRC），**不照抄** USB v2 的 int32 语义 |
+| 3 | v3 全量作废（互锁层随臂板退役），v4 重写 ID 表 |
+| 4 | 指令频率：DRIVE 100 Hz、ARM 50 Hz；遥测 100/50/10 Hz——总线负载 ~7 % |
+| 5 | 电池欠压 10500 mV 沿用为硬约束（安全层拒绝 ARMED 轮命令） |
 
-### 10.2 因此派生的实现约束（不是新问题，是上面的推论）
+### 10.2 固件侧待办（R45，底盘仓）
 
-1. **矢量饱和必须等比**：三轮同时给 `Vx`、`Vy`、`ωz` 时，某轮的合成轮速可能超限。处理方式：先把四轮目标算出来，若 `max(|v_i|) > V_CMD_LIMIT` 则**四个同比例缩小**，**不得逐轴截断**（逐轴截断会改变运动方向，斜走会变直走）。这条写进 `app_mecanum` 的验收用例。
-2. **Jetson 侧控制器选型**：现有 `motor_stub/cmd_vel_stub.py` 是原样透传 `Twist`（它自己注释写了"unicycle contract is the only contract"）。要产生 `linear.y`，**Nav2 必须换 `nav2_mecanum_controller`**（输出的 Twist 带 y）；`cmd_vel_stub` 作为透传层可以不改，但它的注释与文档得同步改成"全向合同"。MoveIt 下发的是关节目标，走 `0x101/0x102`，与路径规划不冲突。
-3. **`homed` 不入 Flash**：复位/看门狗后必须重做零位标定。这是硬要求，不是建议。
+1. `app_can.c` 按 v4 重写编解码（参考 `docs/gen/can_protocol.h`），删除 XFER/EMCY_ARM；`0x010` 快速路径保留（CRC 种子改 DID 0x01 不变，向量 V1 与 v3 兼容）。
+2. cantx 任务改发 `WHEEL_POS_A/B` + `WHEEL_SPD`（100 Hz）+ `SERVO_STATE_A/B`（50 Hz）+ `DIAG`（10 Hz）+ `NODE_INFO`（1 Hz）。
+3. canrx 任务解析 `DRIVE_CMD`（4×int16 0.01 rad/s → 轮速目标，接原 `car_can_velocity` 路径）与 `ARM_CMD_A/B`（0.1° → `servo_set_pulse`）。
+4. deadman：`DRIVE_CMD` 100 ms / `ARM_CMD` 100 ms；`DIAG` 增加 `BUSOFF_CNT`。
+5. **Build tag 升 R45**；上板按 §8 边界用例复测并记录实测数据（AGENTS.md §5 规矩）。
 
-### 10.3 Jetson（`rak`）侧待办（用户指示：先 push 到最新再改）
+### 10.3 Jetson 侧待办（`rak` 仓）
 
-**仓状态（先对齐再动工）**：本地 `rak` HEAD = `3588521`（把 Orin 运行树 import 成 snapshot，领先 `origin/main` 1 个提交）且 `brain/` 有未提交改动；Orin 上 `~/rak` HEAD 仍是更早的 `1b2869e` 却有 **34 个未提交文件**；两边都没 push。**改 `rak` 前必须先决定以哪边为准**，否则会互相覆盖。
+1. 新增 CAN 主机节点（`python-can` + SocketCAN），编解码以 `protocol-signals.yaml` 为准。
+2. `rak_hardware` SystemInterface 切 CAN 传输层（4 轮速 + 7 关节位置契约不变）。
+3. TUI（`rak_drive_tui` / `rak_arm_tui`）增加 CAN 后端；串口后端保留为备用。
 
-实测事实（直接查 Orin 得到）：机器 = **Jetson Orin Nano Developer Kit**；`can0` 存在但 DOWN，驱动 = **mttcan**（`c310000.mttcan`，clock **50 MHz**，带 dtseg/dsjw 即**硬件支持 FD，但本项目禁用**）；另有第二个控制器 `c320000` 未注册；`/opt/nvidia/jetson-io` 存在但**里面没有任何 CAN 功能项**（grep 无命中）→ **CAN 引脚不在 jetson-io 可配范围**，具体物理针脚得查载板手册/设备树后才能断言。另：全仓**一行 CAN 代码都没有**（`nerve` 不存在、`CanFrame.msg` 已删）。
+### 10.4 版本共存约定
 
-要改的：
-
-1. `rak/CLAUDE.md` 与 `README.md` 里的 **3 处 "CAN FD"** → 本v3（CAN 2.0A @1 Mbps）。
-2. `rak/CLAUDE.md` 写的叶子节点 **STM32G474 + HRTIM** / **STM32H743**（`Thecnfor/rak-arm`、`rak-chassis`）→ 实际是**两块相同的 C30D F407**，在本工作区 `vehical_rak_arm`/`vehical_rak_chassis`。
-3. 新增 CAN 节点（按 §3-§6 + `protocol-signals.yaml`）。
-4. 启用命令**不得带 fd**：`ip link set can0 type can bitrate 1000000` → `ip link set can0 up`。上总线前先用 **`loopback` 自环**验证控制器与驱动栈（`cansend`/`candump` 自己发自己收），再接真总线——这样能把"引脚没引出来 / 收发器电平不对 / 位时序错"三类问题分开。需 sudo（本机 `sudo -n` 被拒，要口令）。
-5. **TJA1050 电平警告（必须处理）**：TJA1050 是 **5 V 供电**器件，RXD（送进 Orin 的那根）输出高电平接近其 IO 电源，而 Orin 的 GPIO 是 3.3 V 域。三种可行做法：① 用带 **VIO** 的版本并把 VIO 接 3.3 V；② RXD→Orin 串 1 kΩ + 3.3 V 钳位二极管；③ 直接换 **3.3 V 收发器**（SN65HVD230，与 F407 板载同类）。**上电前先用万用表量 RXD 对地电压，确认 ≤ 3.6 V 再插 Orin 针脚。**
-
-### 10.4 MCU 侧要改的
-
-1. 时钟树切 HSE（§2）——**上总线前第一项**。
-2. CAN 引脚按 **PD0/PD1**，收发器用板载；`.ioc` 里别选 PB8/PB9。
-3. `app_can` 只写纯函数 pack/unpack（可 host 编译 + 跑 §9 向量），ISR 里只置标志与拷贝，不解析。
+- `NODE_INFO.PROTO=4` 是 v4 节点的身份声明；Jetson 收到 `PROTO=3` 的 `NODE_INFO`（旧固件）应提示版本不匹配并拒绝发指令。
+- v3 文档（git 历史）仅作互锁设计参考，不再维护。

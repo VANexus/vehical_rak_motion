@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""CAN 协议 v3 校验器 + 参考编解码 + 一致性测试向量生成。
+"""CAN 协议 v4 校验器 + 参考编解码 + 一致性测试向量生成。
 
 单一来源是 docs/protocol-signals.yaml。本脚本做三件事：
-  1. 结构校验：ID/Data ID 唯一、每帧信号位宽合计 48 bit、信号名存在、reserved 必须为 0、
-     原始值不溢出、物理值在 min/max 内。
+  1. 结构校验：ID/Data ID 唯一、布局位宽正确（raw8=64bit / e2e=48bit）、信号名存在、
+     reserved 必须为 0、原始值不溢出、物理值在 min/max 内、安全帧 ID 优先级。
   2. 用参考实现编码 vectors，逐字节打印，并把结果写回 YAML 的 expect 字段（--update），
-     之后 CI 只要比对 expect 是否变化即可（三方 C/Rust 实现都拿这张表对答案）。
-  3. 负例自检：任意字节被篡改后 CRC 必须失败。
+     之后 CI 只要比对 expect 是否变化即可（两端 C/Python 实现都拿这张表对答案）。
+  3. 负例自检：e2e 帧任意字节被篡改后 CRC 必须失败。
 
 用法：
     python3 tools/can_check.py            # 校验 + 打印向量表（markdown）
     python3 tools/can_check.py --update   # 追加把 expect 回填进 YAML
-    python3 tools/can_check.py --c-header # 生成可给两个 MCU 工程用的 C 头
+    python3 tools/can_check.py --c-header # 生成两个 MCU 工程共用的 docs/gen/can_protocol.h
 """
 from __future__ import annotations
 import sys
@@ -34,30 +34,39 @@ def crc8(data: bytes, data_id: int) -> int:
 
 
 def encode_signal(raw: int, sig: dict) -> bytes:
-    """单个 16 bit 信号，小端。"""
-    if sig["len"] != 16:
-        raise ValueError(f"本版本只支持 16 bit 信号，见 {sig}")
-    lim = 0x7FFF if sig["signed"] else 0xFFFF
-    if raw < -(0x8000 if sig["signed"] else 0) or raw > lim:
-        raise OverflowError(f"原始值 {raw} 超出 16 bit 范围")
-    return (raw & 0xFFFF).to_bytes(2, "little")
+    """8/16/32 bit 信号，小端。"""
+    n = sig["len"]
+    if n not in (8, 16, 32):
+        raise ValueError(f"不支持的位宽 {n}，见 {sig}")
+    if sig["signed"]:
+        lo, hi = -(1 << (n - 1)), (1 << (n - 1)) - 1
+    else:
+        lo, hi = 0, (1 << n) - 1
+    if raw < lo or raw > hi:
+        raise OverflowError(f"原始值 {raw} 超出 {n} bit 范围 [{lo}, {hi}]")
+    return (raw & ((1 << n) - 1)).to_bytes(n // 8, "little")
 
 
 def decode_signal(b: bytes, sig: dict) -> int:
     v = int.from_bytes(b, "little")
-    if sig["signed"] and v >= 0x8000:
-        v -= 0x10000
+    if sig["signed"] and v >= (1 << (len(b) * 8 - 1)):
+        v -= 1 << (len(b) * 8)
     return v
 
 
-def build_frame(msg: dict, sigdb: dict, values: dict, counter: int, flags: int) -> bytes:
+def build_frame(msg: dict, sigdb: dict, values: dict, counter: int = 0, flags: int = 0) -> bytes:
+    if msg.get("layout", "raw8") == "e2e":
+        body = bytearray()
+        for name in msg["signals"]:
+            body += encode_signal(int(values.get(name, 0)), sigdb[name])
+        assert len(body) == 6, f"{msg['name']} 信号总长 {len(body)} != 6 字节"
+        body.append(((counter & 0xF) << 4) | (flags & 0xF))
+        body.append(crc8(bytes(body), msg["data_id"]))
+        return bytes(body)
     body = bytearray()
     for name in msg["signals"]:
-        sig = sigdb[name]
-        body += encode_signal(int(values.get(name, 0)), sig)
-    assert len(body) == 6, f"{msg['name']} 信号总长 {len(body)} != 6 字节"
-    body.append(((counter & 0xF) << 4) | (flags & 0xF))
-    body.append(crc8(bytes(body), msg["data_id"]))
+        body += encode_signal(int(values.get(name, 0)), sigdb[name])
+    assert len(body) == 8, f"{msg['name']} 信号总长 {len(body)} != 8 字节"
     return bytes(body)
 
 
@@ -74,20 +83,22 @@ def check_structure(db, sigdb, msgs) -> list[str]:
         errs.append("存在重复的 CAN ID")
     if len(set(dids)) != len(dids):
         errs.append("存在重复的 Data ID（CRC 初值必须每帧唯一）")
-    # 优先级：安全/故障/互锁的 ID 必须小于指令与反馈
+    # 优先级：安全/管理帧的 ID 必须小于指令帧
     safe_max = max(m["id"] for m in db["messages"] if m["id"] < 0x040)
     cmd_min = min(m["id"] for m in db["messages"] if m["id"] >= 0x100)
     if safe_max >= cmd_min:
-        errs.append("ID 分配违背优先级要求：安全类帧 ID 必须小于指令帧")
+        errs.append("ID 分配违背优先级要求：安全/管理类帧 ID 必须小于指令帧")
     for m in db["messages"]:
+        layout = m.get("layout", "raw8")
+        want_bits = 48 if layout == "e2e" else 64
         total = 0
         for name in m["signals"]:
             if name not in sigdb:
                 errs.append(f"{m['name']}: 未知信号 {name}")
                 continue
             total += sigdb[name]["len"]
-        if total != 48:
-            errs.append(f"{m['name']}: 信号合计 {total} bit，应为 48")
+        if total != want_bits:
+            errs.append(f"{m['name']}: 信号合计 {total} bit，{layout} 布局应为 {want_bits}")
     for m in db["messages"]:
         for name in m["signals"]:
             sig = sigdb.get(name, {})
@@ -115,18 +126,19 @@ def check_vectors(db, sigdb, msgs) -> tuple[list[str], list[tuple[str, int, str,
             phys = int(val) * sig["factor"]
             if not (sig["min"] - 1e-9 <= phys <= sig["max"] + 1e-9):
                 errs.append(f"{v['name']}: {name} 物理值 {phys} 超出 [{sig['min']}, {sig['max']}]")
-        frame = build_frame(msg, sigdb, v["values"], v["counter"], v["flags"])
+        frame = build_frame(msg, sigdb, v["values"], v.get("counter", 0), v.get("flags", 0))
         rows.append((v["name"], msg["id"], frame.hex(" ").upper(), msg["name"]))
         if v.get("expect") not in (None, ""):
             want = bytes.fromhex(str(v["expect"]).replace(" ", ""))
             if want != frame:
                 errs.append(f"{v['name']}: 与 YAML 中 expect 不一致（协议被改动？want {want.hex(' ')} got {frame.hex(' ')}）")
-        # 负例：篡改任一字节，CRC 必须失败
-        for i in range(8):
-            tampered = bytearray(frame)
-            tampered[i] ^= 0x01
-            if crc8(bytes(tampered[:7]), msg["data_id"]) == tampered[7] and i < 7:
-                errs.append(f"{v['name']}: 字节 {i} 被篡改后 CRC 仍通过，校验强度不足")
+        # 负例：e2e 帧篡改任一字节，CRC 必须失败
+        if msg.get("layout", "raw8") == "e2e":
+            for i in range(8):
+                tampered = bytearray(frame)
+                tampered[i] ^= 0x01
+                if crc8(bytes(tampered[:7]), msg["data_id"]) == tampered[7] and i < 7:
+                    errs.append(f"{v['name']}: 字节 {i} 被篡改后 CRC 仍通过，校验强度不足")
     return errs, rows
 
 
@@ -162,7 +174,7 @@ def c_header(db, sigdb, msgs) -> str:
         'extern "C" {',
         "#endif",
         f"#define CAN_PROTO_VER {db['version']}",
-        "#define CAN_CRC_POLY 0x07u /* 初值 = 帧 Data ID，覆盖字节 0..6，无反射 */",
+        "#define CAN_CRC_POLY 0x07u /* 初值 = 帧 Data ID，覆盖字节 0..6，仅 e2e 帧，无反射 */",
         "",
         "/* 帧 ID / Data ID / 周期(Hz) */",
     ]
@@ -184,7 +196,7 @@ def c_header(db, sigdb, msgs) -> str:
         "    return crc;",
         "}",
         "",
-        "/* 16 bit 小端读写 */",
+        "/* 小端读写 */",
         "static inline void can_put16(uint8_t *p, int16_t v)",
         "{",
         "    p[0] = (uint8_t)(v & 0xFF); p[1] = (uint8_t)(((uint16_t)v >> 8) & 0xFF);",
@@ -192,6 +204,16 @@ def c_header(db, sigdb, msgs) -> str:
         "static inline int16_t can_get16(const uint8_t *p)",
         "{",
         "    return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));",
+        "}",
+        "static inline void can_put32(uint8_t *p, int32_t v)",
+        "{",
+        "    p[0] = (uint8_t)(v & 0xFF);          p[1] = (uint8_t)(((uint32_t)v >> 8) & 0xFF);",
+        "    p[2] = (uint8_t)(((uint32_t)v >> 16) & 0xFF); p[3] = (uint8_t)(((uint32_t)v >> 24) & 0xFF);",
+        "}",
+        "static inline int32_t can_get32(const uint8_t *p)",
+        "{",
+        "    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |",
+        "                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));",
         "}",
         "#ifdef __cplusplus",
         "}",

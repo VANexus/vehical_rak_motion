@@ -1,190 +1,200 @@
-# CAN 协议 v3 —— 机器可读的信号数据库（单一来源）
-# 规范性文字见 protocol.md；本文件是三端（STM32 C / Jetson Python-Rust / CI）共同的编码依据。
-# 校验与测试向量生成：python3 ../tools/can_check.py
+# CAN 协议 v4 —— 机器可读的信号数据库（单一来源）
+# 规范性文字见 protocol.md；本文件是两端（STM32 C / Jetson Python）+ CI 共同的编码依据。
+# 校验与测试向量生成：python3 tools/can_check.py
 #
 # 约定：
 #   byte_order: little        -> Intel/小端（低字节在低地址）
-#   crc: 覆盖 byte0..byte6，多项式 0x07，无反射，初值 = 本帧 data_id，无最终异或
-#   layout: byte0..5 = 信号（按顺序紧凑排列），byte6 = [7:4] alive_counter | [3:0] flags，byte7 = CRC8
-#   每帧信号总位宽必须 = 48 bit（6 字节）；不足者用 reserved 补齐
-version: 3
+#   layout:
+#     raw8: DLC=8，byte0..7 = 信号（按顺序紧凑排列，总位宽必须 = 64 bit）。
+#           无应用层 counter/CRC——传输完整性由 CAN 2.0 的 15 bit HW CRC + ACK + 自动重传保证。
+#     e2e:  DLC=8，byte0..5 = 信号（48 bit），byte6 = [7:4] alive_counter | [3:0] flags，
+#           byte7 = CRC8（覆盖 byte0..6，多项式 0x07，无反射，初值 = 本帧 data_id，无最终异或）。
+#           仅用于其损坏会造成物理后果的安全帧（AUTOSAR E2E Profile 1 同构）。
+#   每帧信号总位宽必须等于布局规定的位宽；不足者用 reserved 补齐，reserved 必须发 0。
+version: 4
 bus:
   bitrate: 1000000
   fd: false
   frame: CAN2.0A-11bit
   nodes:
-    jetson: 上位机（rak / Orin Nano，can0 = mttcan，clock 50 MHz）
+    jetson:  上位机（rak / Orin Nano，can0 = mttcan，外置 SN65HVD230）
     chassis: vehical_rak_chassis（C30D F407VET6，CAN1 = PD0 RX / PD1 TX，板载收发器）
-    arm: vehical_rak_arm（同一块 C30D，引脚与底盘一致）
+  # v4 起：单节点拓扑（机械臂板已烧毁退役）。USB v2 串口路径保留为备用链路，帧格式不变。
+  ground: 两个节点 GND 必须互联（差分总线共模参考）；总线两个物理端点各 120 Ω
 
 units:
-  mm_s: {factor: 1, unit: mm/s}
-  rad_s: {factor: 0.001, unit: rad/s}
-  deg: {factor: 0.01, unit: deg}
-  mv: {factor: 1, unit: mV}
+  rad_s:  {factor: 0.01, unit: rad/s}
+  deg:    {factor: 0.1,  unit: deg}
+  counts: {factor: 1,    unit: counts}
+  mv:     {factor: 1,    unit: mV}
 
-# flags 低 4 位语义
-flags:
-  cmd:    {bit0: enable, bit1: speed_limit_low, bit2: rsv0, bit3: rsv1}
-  status: {bit0: mode0, bit1: mode1, bit2: estop_latched, bit3: fault_active}
-  safety: {low_nibble: cmd_code}
+# 模式机（DIAG.MODE / STATE_u16 低两位同义）
 mode_enum: {0: IDLE, 1: REMOTE, 2: ESTOP, 3: FAULT}
 
-safety_cmd_code:
-  1: START
-  2: STOP
-  4: EMERGENCY_STOP      # 臂不断使能！进入主动锁位（见 protocol.md §7.1）
-  5: CLEAR_ESTOP
-  6: CLEAR_FAULT
-  7: SOFT_RESET
-  8: HOME_REQUEST        # 请求单向堵转找零（唯一合法的上电动作途径，必须带 enable）
-  9: RELEASE_HOLD        # 只在人工支撑/已 parked 后允许：解除锁位断使能
+safety_cmd_code:           # SAFETY_CMD.CMD（byte0，低 4 位有效）
+  1: START                 # IDLE/FAULT(已复位) -> REMOTE；前提 estop 已清
+  2: STOP                  # 受控减速 -> IDLE（可 START 恢复）
+  4: EMERGENCY_STOP        # 立即锁存急停，ISR 快速路径 <=40us 执行；CAN 清除不实现，
+                           # 只能物理短按按钮解除（R43 生产语义，v4 沿用）
+  5: CLEAR_ESTOP           # 规范保留：CAN 侧清除（固件当前不实现，收到即丢弃）
+  6: CLEAR_FAULT           # 故障复位（仅当故障条件已消失）
+  7: SOFT_RESET            # NVIC_SystemReset；急停锁存跨复位保持
 
-state_bits:              # STATE_u16 位图，跟 0x201/0x212 上报（10 Hz）
-  bit0: homed            # 1 = 已做过单向堵转零位标定
-  bit1: homing_active    # 1 = 正在零位标定中
-  bit2_3: mode           # 0 IDLE / 1 REMOTE / 2 ESTOP_HELD / 3 FAULT
-  bit4: estop_latched
-  bit5: holding          # 1 = 臂在主动锁位（断使能会回落）
-  bit6: stepper_mismatch # 1 = 步进已发脉冲但位置未变（堵转/失步）
-  bit7: cmd_stale        # 1 = 指令超 100 ms 未更新
+state_bits:                # STATE_u16 位图（DIAG / NODE_INFO 上报）
+  bit0: estop_latched      # 1 = 急停锁存中（只能按钮清除）
+  bit1: remote_running     # 1 = REMOTE 且电机使能
+  bit2: fault_active       # 1 = FAULT
+  bit3: cmd_stale          # 1 = DRIVE/ARM 指令断流（deadman 超时）
+  bit4: bat_uv             # 1 = 电池欠压（< 10500 mV）
+  bit5: can_recovering     # 1 = bus-off 自动恢复中
+  bit6_15: reserved
 
+# deadman / 超时（ms）
 timeout_ms:
-  chassis_cmd_deadman: 100      # 0x100 断流 -> 受控减速停
-  arm_cmd_deadman: 100          # 0x101/0x102 断流 -> 保持当前位置（不回落）
-  interlock_deadman: 10         # 0x030 / 0x031 双向互锁
-  jetson_node_lost: 200         # Jetson 判节点失联（0x200/0x210）
+  cmd_deadman: 100         # DRIVE_CMD / ARM_CMD 断流：轮速目标清零 / 舵机保持当前位
+  host_node_lost: 200      # Jetson 判节点失联（DIAG 或 NODE_INFO 断流）：冻结输出 + STOP
 
 messages:
-  - id: 0x100
-    name: CHASSIS_VEL_CMD
-    data_id: 0x06
-    cycle_hz: 100
-    dir: jetson->chassis
-    signals: [VX_i16, VY_i16, WZ_i16]
-
-  - id: 0x101
-    name: ARM_JOINT_CMD_A
-    data_id: 0x07
-    cycle_hz: 100
-    dir: jetson->arm
-    signals: [J1_i16, J2_i16, J3_i16]
-
-  - id: 0x102
-    name: ARM_JOINT_CMD_B
-    data_id: 0x08
-    cycle_hz: 100
-    dir: jetson->arm
-    signals: [J4_i16, BASE_u16, RSVD16]
-
-  - id: 0x200
-    name: CHASSIS_VEL_FB
-    data_id: 0x09
-    cycle_hz: 100
-    dir: chassis->jetson
-    signals: [VX_i16, VY_i16, WZ_i16]
-
-  - id: 0x201
-    name: CHASSIS_DIAG
-    data_id: 0x0A
-    cycle_hz: 10
-    dir: chassis->jetson
-    signals: [BAT_u16, FAULT_u16, STATE_u16]
-
-  - id: 0x210
-    name: ARM_JOINT_FB_A
-    data_id: 0x0B
-    cycle_hz: 100
-    dir: arm->jetson
-    signals: [J1_i16, J2_i16, J3_i16]
-
-  - id: 0x211
-    name: ARM_JOINT_FB_B
-    data_id: 0x0C
-    cycle_hz: 100
-    dir: arm->jetson
-    signals: [J4_i16, BASE_u16, RSVD16]
-
-  - id: 0x212
-    name: ARM_DIAG
-    data_id: 0x0D
-    cycle_hz: 10
-    dir: arm->jetson
-    signals: [BAT_u16, FAULT_u16, STATE_u16]
-
-  - id: 0x030
-    name: XFER_CH_TO_ARM
-    data_id: 0x04
-    cycle_hz: 1000
-    dir: chassis->arm
-    signals: [VX_i16, VY_i16, WZ_i16]
-
-  - id: 0x031
-    name: XFER_ARM_TO_CH
-    data_id: 0x05
-    cycle_hz: 1000
-    dir: arm->chassis
-    signals: [FAULT_u16, J4_i16, BASE_u16]
-
+  # ---- 安全 / 管理（ID < 0x100，保证抢总线优先级高于一切指令帧）----
   - id: 0x010
     name: SAFETY_CMD
     data_id: 0x01
     cycle_hz: 0            # 事件
     dir: jetson->broadcast
+    layout: e2e
     signals: [SCMD_u16, RSVD16, RSVD16]
 
   - id: 0x020
-    name: EMCY_CHASSIS
+    name: EMCY
     data_id: 0x02
     cycle_hz: 0            # 事件：10 ms 内首发，重发 3 次
     dir: chassis->broadcast
-    signals: [FAULT_u16, AUX_u16, RSVD16]
+    layout: raw8
+    signals: [FAULT_u16, AUX_u16, STATE_u16, RSVD16]
 
-  - id: 0x021
-    name: EMCY_ARM
+  - id: 0x030
+    name: NODE_INFO
     data_id: 0x03
-    cycle_hz: 0
-    dir: arm->broadcast
-    signals: [FAULT_u16, AUX_u16, RSVD16]
-
-  - id: 0x230
-    name: NODE_INFO_CHASSIS
-    data_id: 0x0E
     cycle_hz: 1            # 上电 1 次 + 1 Hz
     dir: chassis->broadcast
-    signals: [PVER_u16, BUILD_u16, RSVD16]
+    layout: raw8
+    signals: [PROTO_u8, HWREV_u8, BUILD_u16, FAULT_u16, STATE_u16]
 
-  - id: 0x231
-    name: NODE_INFO_ARM
-    data_id: 0x0F
-    cycle_hz: 1
-    dir: arm->broadcast
-    signals: [PVER_u16, BUILD_u16, RSVD16]
+  # ---- 指令（jetson -> chassis）----
+  - id: 0x100
+    name: DRIVE_CMD
+    data_id: 0x04
+    cycle_hz: 100
+    dir: jetson->chassis
+    layout: raw8
+    signals: [W1SPD_i16, W2SPD_i16, W3SPD_i16, W4SPD_i16]
+
+  - id: 0x110
+    name: ARM_CMD_A
+    data_id: 0x05
+    cycle_hz: 50
+    dir: jetson->chassis
+    layout: raw8
+    signals: [J1ANG_u16, J2ANG_u16, J3ANG_u16, J4ANG_u16]
+
+  - id: 0x111
+    name: ARM_CMD_B
+    data_id: 0x06
+    cycle_hz: 50
+    dir: jetson->chassis
+    layout: raw8
+    signals: [J5ANG_u16, J6ANG_u16, GRIP_u16, RSVD16]
+
+  # ---- 遥测（chassis -> jetson）----
+  - id: 0x200
+    name: WHEEL_POS_A
+    data_id: 0x07
+    cycle_hz: 100
+    dir: chassis->jetson
+    layout: raw8
+    signals: [W1POS_i32, W2POS_i32]
+
+  - id: 0x201
+    name: WHEEL_POS_B
+    data_id: 0x08
+    cycle_hz: 100
+    dir: chassis->jetson
+    layout: raw8
+    signals: [W3POS_i32, W4POS_i32]
+
+  - id: 0x202
+    name: WHEEL_SPD
+    data_id: 0x09
+    cycle_hz: 100
+    dir: chassis->jetson
+    layout: raw8
+    signals: [W1SPD_i16, W2SPD_i16, W3SPD_i16, W4SPD_i16]
+
+  - id: 0x210
+    name: SERVO_STATE_A
+    data_id: 0x0A
+    cycle_hz: 50
+    dir: chassis->jetson
+    layout: raw8
+    signals: [J1ANG_u16, J2ANG_u16, J3ANG_u16, J4ANG_u16]
+
+  - id: 0x211
+    name: SERVO_STATE_B
+    data_id: 0x0B
+    cycle_hz: 50
+    dir: chassis->jetson
+    layout: raw8
+    signals: [J5ANG_u16, J6ANG_u16, GRIP_u16, RSVD16]
+
+  - id: 0x220
+    name: DIAG
+    data_id: 0x0C
+    cycle_hz: 10
+    dir: chassis->jetson
+    layout: raw8
+    signals: [BAT_u16, FAULT_u16, STATE_u16, MODE_u8, BUSOFFCNT_u8]
 
 # 信号字典：bit 长度 / 有无符号 / factor / min / max
 signals:
-  VX_i16:   {len: 16, signed: true,  factor: 1,     min: -32768, max: 32767, desc: 车体系 X 速度 mm/s}
-  VY_i16:   {len: 16, signed: true,  factor: 1,     min: -32768, max: 32767, desc: 车体系 Y 速度 mm/s（左正）}
-  WZ_i16:   {len: 16, signed: true,  factor: 0.001, min: -32.768, max: 32.767, desc: 角速度 rad/s（逆时针正）}
-  J1_i16:   {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 关节 1 角 deg}
-  J2_i16:   {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 关节 2 角 deg}
-  J3_i16:   {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 关节 3 角 deg}
-  J4_i16:   {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 关节 4 角 deg}
-  BASE_u16: {len: 16, signed: false, factor: 0.01,  min: 0, max: 655.35, desc: 底座旋转角 deg（0..360，无符号）}
-  BAT_u16:  {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 电池电压 mV}
-  FAULT_u16: {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 故障码，0=无}
-  AUX_u16:  {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 附加码（首个出错通道等）}
-  SCMD_u16: {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: SAFETY_CMD 命令码（低 4 位有效）}
-  PVER_u16: {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 高字节协议版本，低字节硬件版本}
-  BUILD_u16: {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 固件构建标识（git short hash 折 16 位）}
-  STATE_u16: {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 状态位图（state_bits：homed/mode/holding/...）}
-  RSVD16:   {len: 16, signed: false, factor: 1,     min: 0, max: 0,     desc: 保留，必须填 0}
+  W1SPD_i16: {len: 16, signed: true,  factor: 0.01, min: -327.67, max: 327.67, desc: 轮1 目标/实测角速度 rad/s（前转正）}
+  W2SPD_i16: {len: 16, signed: true,  factor: 0.01, min: -327.67, max: 327.67, desc: 轮2 角速度 rad/s}
+  W3SPD_i16: {len: 16, signed: true,  factor: 0.01, min: -327.67, max: 327.67, desc: 轮3 角速度 rad/s}
+  W4SPD_i16: {len: 16, signed: true,  factor: 0.01, min: -327.67, max: 327.67, desc: 轮4 角速度 rad/s}
+  W1POS_i32: {len: 32, signed: true,  factor: 1,    min: -2147483648, max: 2147483647, desc: 轮1 累计位置（编码器计数，上电=0，里程计用）}
+  W2POS_i32: {len: 32, signed: true,  factor: 1,    min: -2147483648, max: 2147483647, desc: 轮2 累计位置 counts}
+  W3POS_i32: {len: 32, signed: true,  factor: 1,    min: -2147483648, max: 2147483647, desc: 轮3 累计位置 counts}
+  W4POS_i32: {len: 32, signed: true,  factor: 1,    min: -2147483648, max: 2147483647, desc: 轮4 累计位置 counts}
+  J1ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节1 指令/实际角 deg（0.1°，0..270）}
+  J2ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节2 角 deg}
+  J3ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节3 角 deg}
+  J4ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节4 角 deg}
+  J5ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节5 角 deg}
+  J6ANG_u16: {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 关节6 角 deg}
+  GRIP_u16:  {len: 16, signed: false, factor: 0.1,  min: 0, max: 2700, desc: 夹爪开度 deg}
+  BAT_u16:   {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 电池电压 mV}
+  FAULT_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 故障码，0=无}
+  AUX_u16:   {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 附加码（首个出错通道等）}
+  STATE_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 状态位图（state_bits）}
+  MODE_u8:   {len: 8,  signed: false, factor: 1,    min: 0, max: 3,     desc: 模式机（mode_enum）}
+  BUSOFFCNT_u8: {len: 8, signed: false, factor: 1, min: 0, max: 255,  desc: bus-off 累计计数（饱和 255）}
+  PROTO_u8:  {len: 8,  signed: false, factor: 1,    min: 0, max: 255,  desc: 协议版本，本文档 = 4}
+  HWREV_u8:  {len: 8,  signed: false, factor: 1,    min: 0, max: 255,  desc: 硬件版本}
+  BUILD_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 固件构建标识（git short hash 折 16 位）}
+  SCMD_u16:  {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: SAFETY_CMD 命令码（低 4 位有效）}
+  RSVD16:    {len: 16, signed: false, factor: 1,    min: 0, max: 0,    desc: 保留，必须填 0}
+  RSVD8:     {len: 8,  signed: false, factor: 1,    min: 0, max: 0,    desc: 保留，必须填 0}
 
-# 一致性测试向量（三端都必须复现同样的 8 字节）
+# 一致性测试向量（两端都必须复现同样的字节）
 vectors:
-  - {msg: CHASSIS_VEL_CMD, name: V1, counter: 0,  flags: 0x1, values: {VX_i16: 500, VY_i16: -200, WZ_i16: 150}, expect: F4 01 38 FF 96 00 01 60}
-  - {msg: ARM_JOINT_CMD_A, name: V2, counter: 1,  flags: 0x1, values: {J1_i16: 1000, J2_i16: -500, J3_i16: 250}, expect: E8 03 0C FE FA 00 11 21}
-  - {msg: CHASSIS_VEL_FB,  name: V3, counter: 12, flags: 0x1, values: {VX_i16: 498, VY_i16: -203, WZ_i16: 149}, expect: F2 01 35 FF 95 00 C1 52}
-  - {msg: SAFETY_CMD,      name: V4, counter: 5,  flags: 0x0, values: {SCMD_u16: 4}, expect: 04 00 00 00 00 00 50 1D}
-  - {msg: XFER_ARM_TO_CH,  name: V5, counter: 15, flags: 0x9, values: {FAULT_u16: 0x51, J4_i16: -1234, BASE_u16: 36000}, expect: 51 00 2E FB A0 8C F9 BF}
-  - {msg: NODE_INFO_CHASSIS, name: V6, counter: 0, flags: 0x0, values: {PVER_u16: 0x0301, BUILD_u16: 0xABCD}, expect: 01 03 CD AB 00 00 00 5C}
+  - {msg: SAFETY_CMD,    name: V1, counter: 5,  flags: 0x0, values: {SCMD_u16: 4}, expect: 04 00 00 00 00 00 50 1D}
+  - {msg: EMCY,          name: V2, values: {FAULT_u16: 0x30, AUX_u16: 1, STATE_u16: 0x0005}}
+  - {msg: NODE_INFO,     name: V3, values: {PROTO_u8: 4, HWREV_u8: 1, BUILD_u16: 0xABCD, FAULT_u16: 0, STATE_u16: 0x0001}}
+  - {msg: DRIVE_CMD,     name: V4, values: {W1SPD_i16: 500, W2SPD_i16: -200, W3SPD_i16: 500, W4SPD_i16: -200}}
+  - {msg: ARM_CMD_A,     name: V5, values: {J1ANG_u16: 0, J2ANG_u16: 2250, J3ANG_u16: 2700, J4ANG_u16: 0}}
+  - {msg: ARM_CMD_B,     name: V6, values: {J5ANG_u16: 0, J6ANG_u16: 0, GRIP_u16: 900}}
+  - {msg: WHEEL_POS_A,   name: V7, values: {W1POS_i32: 100000, W2POS_i32: -50000}}
+  - {msg: WHEEL_POS_B,   name: V8, values: {W3POS_i32: 123456789, W4POS_i32: -1}}
+  - {msg: WHEEL_SPD,     name: V9, values: {W1SPD_i16: 120, W2SPD_i16: 120, W3SPD_i16: -80, W4SPD_i16: -80}}
+  - {msg: SERVO_STATE_A, name: VA, values: {J1ANG_u16: 0, J2ANG_u16: 2250, J3ANG_u16: 2700, J4ANG_u16: 0}}
+  - {msg: SERVO_STATE_B, name: VB, values: {J5ANG_u16: 0, J6ANG_u16: 0, GRIP_u16: 900}}
+  - {msg: DIAG,          name: VC, values: {BAT_u16: 11100, FAULT_u16: 0, STATE_u16: 0x0003, MODE_u8: 1, BUSOFFCNT_u8: 0}}
