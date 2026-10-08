@@ -23,6 +23,9 @@ void servo_init(void);
 /* 直接设脉宽 µs（500~2500），ch = 0~5（见上面接口表） */
 void servo_set_pulse(unsigned ch, unsigned us);
 
+/* [AI] R45: 读回当前脉宽 µs（CAN v4 SERVO_STATE 遥测用），ch = 0~5 */
+unsigned servo_get_pulse(unsigned ch);
+
 /* 设定角度 0~180°，ch = 0~5；越界会自动夹到 0~180 */
 void servo_set_angle(unsigned ch, int deg);
 

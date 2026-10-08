@@ -163,3 +163,17 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 - `../car2/tools/references/smart-transport-robot/`：同板完整课设（底盘 `chassis/mecanum.c`、`motor_ctrl.c`、`calib.c`，IMU 打法）。
 
 *最后更新：2026-10-03（R5：上板运行 + CAN 软栈验证；取证/修复/清单见 `../car/README4.md` §二/§二C）。改动构建方式或外设结论时请同步本文件。*
+
+## R49（2026-10-09）：CAN v4 主链路
+
+CAN 全面接管控制与遥测（协议 v4，见 docs/PROTOCOL.md），USB v2 冻结为备用。
+
+**烟测已验证**：遥测 7 帧全速率（100/50/10/1Hz）、START/STOP 远程门、DRIVE_CMD 流式驱动
+（轮位增量与 SWD 直读 TIM2/TIM4 CNT 逐位一致）、100ms deadman、运动中急停 ISR 快速路径。
+
+### ⚠️ Known Issue（R50 修复，冻结不阻塞）
+
+**CAN RX 方向在"按钮清急停"后死亡**（复现 2/2）：清急停短按之后，Jetson 下发的
+SAFETY/DRIVE 帧不再被固件响应（TX 遥测正常、Jetson 侧帧被 ACK），冷启动恢复。
+怀疑方向：sign_store / FLASH 写与 bxCAN RX 中断的互踩（R38 落盘路径 / EXTI 按键路径），
+或 NVIC 优先级配置。规避：出现症状后给下位机断电重启即可恢复。

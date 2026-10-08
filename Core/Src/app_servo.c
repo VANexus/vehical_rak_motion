@@ -66,6 +66,21 @@ void servo_set_pulse(unsigned ch, unsigned us)
     }
 }
 
+/* [AI] R45: 读回当前比较值（CAN v4 SERVO_STATE 遥测用）。
+   非法通道回中位 1500µs（与 CubeMX 初始 Pulse 一致）。 */
+unsigned servo_get_pulse(unsigned ch)
+{
+    switch (ch) {
+    case 0U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim8,  TIM_CHANNEL_1);
+    case 1U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim8,  TIM_CHANNEL_2);
+    case 2U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim8,  TIM_CHANNEL_3);
+    case 3U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim8,  TIM_CHANNEL_4);
+    case 4U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim12, TIM_CHANNEL_1);
+    case 5U: return (unsigned)__HAL_TIM_GET_COMPARE(&htim12, TIM_CHANNEL_2);
+    default: return SERVO_MID_US;
+    }
+}
+
 void servo_set_angle(unsigned ch, int deg)
 {
     if (deg < 0)   deg = 0;
