@@ -72,6 +72,7 @@ static QueueHandle_t rx_queue;
 /* [AI] SAFETY START/STOP 置位的 CAN 远程门：1=允许 DRIVE/ARM 落地。
    急停锁存期间 START 被拒（ISR 内查 car_flags）。 */
 static volatile uint8_t can_remote;
+static volatile uint8_t can_clear_req;    /* [AI] R50: CAN CLEAR_ESTOP 请求（ISR 置位，任务落地） */
 static volatile uint32_t last_drive_ms;   /* [AI] 最近 DRIVE_CMD 到达 tick */
 static volatile uint32_t last_arm_ms;     /* [AI] 最近 ARM_CMD 到达 tick */
 static volatile uint8_t drive_stale;      /* [AI] 已执行过断流清零（边沿触发） */
@@ -146,6 +147,13 @@ static uint8_t mode_u8(void)
     return (can_remote != 0U) ? 1U : 0U;
 }
 
+/* [AI] 过滤器自愈用：can_init 时保存配置；FA1R/FFA1R 运行时被未知源篡改的
+   实测签名 = 帧被 ACK 但不进 FIFO（RX 静默死亡 3/3 复现，冷启动恢复）。
+   bxCAN 过滤器寄存器不在 CAN_TypeDef 内，只能直读地址（同 TSR 自愈先例）。 */
+#define CAN1_FFA1R_ADDR  (*(volatile uint32_t *)0x4000660CUL)
+#define CAN1_FA1R_ADDR   (*(volatile uint32_t *)0x40006610UL)
+static CAN_FilterTypeDef can_flt_saved;
+
 /* [AI]  ---- 初始化：过滤器/启动/通知在本函数，队列先于中断使能创建 ---- */
 void can_init(void)
 {
@@ -168,6 +176,7 @@ void can_init(void)
         HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING) != HAL_OK) {
         Error_Handler();   /* [AI] CAN 起不来 = 遥控全失效，boot 即暴露 */
     }
+    can_flt_saved = flt;   /* [AI] R51: 过滤器自愈用副本 */
 }
 
 /* [AI] R20: 由 stm32f4xx_it.c 的 CAN1_RX0_IRQHandler → HAL_CAN_IRQHandler
@@ -199,7 +208,10 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
                 case 2U:                                    /* STOP */
                     can_remote = 0U;
                     break;
-                default:                                    /* 5/6/7 未授权 */
+                case 5U:                                    /* [AI] R50: CLEAR_ESTOP */
+                    can_clear_req = 1U;                     /* 任务侧经安全门落地 */
+                    break;
+                default:                                    /* 6/7 未授权 */
                     break;
                 }
             }
@@ -290,6 +302,14 @@ void can_tx_task_step(uint32_t now_ms)
     serial_rx_service(); /* [AI]  R20: RX 循环 DMA 排水→COBS 解码（任务侧轮询） */
     serial_v2_tick(now_ms);          /* [AI] UART v2 lease、安全状态与遥测节拍（备用链路） */
 
+    /* [AI] R50/R52: CAN 清急停——ISR 只置请求，此处（1kHz 任务上下文）经
+       car_estop_clear_can 安全门落地（R52 起跳过 PD3 使能开关门——开关藏车内
+       难达，远程清除语义要求；保留电池 ≥10500mV + 非 FAULT + fast_req==0 门）。 */
+    if (can_clear_req != 0U) {
+        can_clear_req = 0U;
+        (void)car_estop_clear_can();
+    }
+
     /* [AI]  邮箱死锁自愈：错误风暴后 bxCAN 可把邮箱挂在"忙但不再重试"态，
        固件只查 TME 会永远不再排帧→整机静默；任一邮箱忙超 150ms 强制
        ABRQ 释放重排（正常 ≤1ms 永不误触发，见 README4 §二C） */
@@ -324,6 +344,13 @@ void can_tx_task_step(uint32_t now_ms)
         busoff_prev = bo;
     }
 
+    /* [AI] R51: 过滤器自愈 @1Hz——FA1R.FACT0 被清或 FFA1R.FFA0 被置（帧被拒收、
+       RX 静默死亡）时整组重配。HAL_CAN_ConfigFilter 自带 FINIT 进出，µs 级。 */
+    if (ph == 500U) {
+        if ((CAN1_FA1R_ADDR & 0x1UL) == 0U || (CAN1_FFA1R_ADDR & 0x1UL) != 0U) {
+            (void)HAL_CAN_ConfigFilter(&hcan1, &can_flt_saved);
+        }
+    }
     if (ph % 10U == 0U) {                            /* 100 Hz：轮位×2 + 轮速 */
         int64_t pos_urad[CAR_MOTOR_COUNT];
         int32_t vel_urad_s[CAR_MOTOR_COUNT];

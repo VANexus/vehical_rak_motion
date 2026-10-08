@@ -137,7 +137,7 @@ static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 static uint8_t reset_cause;
-const char build_tag[] = "R49";   /* [AI] R49: CAN v4 主链路（docs/PROTOCOL.md v4）——app_can.c 重写：下行 0x100 DRIVE_CMD(4×int16 0.01rad/s→urad/s)+0x110/111 ARM_CMD(7×uint16 0.1°→urad, A/B 组齐才落地)+0x010 SAFETY（急停 ISR 快速路径不变，START/STOP 开关 CAN 远程门 can_remote，CLEAR_ESTOP 仍仅按钮）；上行 0x200/201 WHEEL_POS(原始 counts,100Hz)+0x202 WHEEL_SPD(urad/s÷10^4,100Hz)+0x210/211 SERVO_STATE(脉宽→0.1°,50Hz)+0x220 DIAG(10Hz,STATE 位图+MODE+bus-off 计数)+0x030 NODE_INFO(1Hz)；DRIVE 断流 100ms deadman 清零+STATE.bit3；v3 XFER/VEL_FB/NODE_INFO@0x230 作废，can_arm_seen 等恒 0 仅为 UART v1 备用路径编译；新增 car_wheel_positions()/servo_get_pulse() 遥测访问器；R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
+const char build_tag[] = "R54";   /* [AI] R54: 回退 R53 栈扩容（4096 打爆 FreeRTOS 堆→任务创建失败→复位循环，uwTick 实测 800ms 循环）；栈溢出假设证伪，幽灵再锁存另查；R52: CAN 清急停跳过 PD3 门（实测断电后 PD3 读高导致所有清除路径被拒；开关藏车内，远程清除语义要求；保留电池+非FAULT+fast_req 门，按钮路径原门不变）；R51: bxCAN 过滤器运行时自愈 @1Hz（RX 静默死亡根因：FA1R.FACT0 被清+FFA1R.FFA0 被置→帧被 ACK 但被过滤器拒收不进 FIFO；SWD 三次稳定读数实锤；与邮箱 ABRQ 自愈同思路）；R50: CAN CLEAR_ESTOP 启用（用户指定：按钮藏车内难按）——0x010 CMD=5 ISR 置请求、1kHz 任务经 car_estop_clear 安全门落地（PD3 使能开关+电池+非 FAULT，与按钮短按同门）；R49: CAN v4 主链路（docs/PROTOCOL.md v4）——app_can.c 重写：下行 0x100 DRIVE_CMD(4×int16 0.01rad/s→urad/s)+0x110/111 ARM_CMD(7×uint16 0.1°→urad, A/B 组齐才落地)+0x010 SAFETY（急停 ISR 快速路径不变，START/STOP 开关 CAN 远程门 can_remote，CLEAR_ESTOP 仍仅按钮）；上行 0x200/201 WHEEL_POS(原始 counts,100Hz)+0x202 WHEEL_SPD(urad/s÷10^4,100Hz)+0x210/211 SERVO_STATE(脉宽→0.1°,50Hz)+0x220 DIAG(10Hz,STATE 位图+MODE+bus-off 计数)+0x030 NODE_INFO(1Hz)；DRIVE 断流 100ms deadman 清零+STATE.bit3；v3 XFER/VEL_FB/NODE_INFO@0x230 作废，can_arm_seen 等恒 0 仅为 UART v1 备用路径编译；新增 car_wheel_positions()/servo_get_pulse() 遥测访问器；R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -1214,7 +1214,10 @@ void car_estop_request_fast(void)
     car_estop_fast_req = 1U;   /* [AI]  CAN 中断调用: 25kHz ISR 执行刹车 */
 }
 
-uint8_t car_estop_clear(void)
+/* [AI] R52: 清急停内部实现——require_pd3 区分按钮/CAN 路径。
+   PD3 使能开关藏车内难达（用户 2026-10-09），CAN 清除路径跳过该门，
+   保留电池欠压 + 非 FAULT + fast_req==0 三门；按钮路径维持原三重门。 */
+static uint8_t car_estop_clear_impl(uint8_t require_pd3)
 {
     int32_t zero_target[MOTOR_COUNT] = {0};
     uint8_t calibrating = (uint8_t)(mode == CALIBRATING);
@@ -1222,7 +1225,9 @@ uint8_t car_estop_clear(void)
     taskENTER_CRITICAL();
     isr_state_lock();
     if (car_safety_clear_allowed(
-            (uint8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) == GPIO_PIN_RESET),
+            require_pd3 ? (uint8_t)(HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_3) ==
+                                     GPIO_PIN_RESET)
+                        : 1U,
             (uint8_t)(mode != FAULT &&
                       motor_vbat_mv >= CAR_BATTERY_UV_THRESHOLD_MV),
             car_estop_fast_req) == 0U) {
@@ -1243,6 +1248,19 @@ uint8_t car_estop_clear(void)
     isr_state_unlock();
     taskEXIT_CRITICAL();
     return 1U;
+}
+
+/* [AI] R52: 按钮路径清急停（PD3 门保留）。 */
+uint8_t car_estop_clear(void)
+{
+    return car_estop_clear_impl(1U);
+}
+
+/* [AI] R52: CAN 路径清急停（跳过 PD3 门——开关藏车内，远程清除语义要求；
+   其余门同按钮路径）。app_can 的 CLEAR_ESTOP(cmd=5) 调用。 */
+uint8_t car_estop_clear_can(void)
+{
+    return car_estop_clear_impl(0U);
 }
 
 /* ---- telemetry outputs (called by Task_CAN_Tx) ---- */

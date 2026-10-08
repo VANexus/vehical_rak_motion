@@ -164,16 +164,25 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 
 *最后更新：2026-10-03（R5：上板运行 + CAN 软栈验证；取证/修复/清单见 `../car/README4.md` §二/§二C）。改动构建方式或外设结论时请同步本文件。*
 
-## R49（2026-10-09）：CAN v4 主链路
+## R49-R54（2026-10-09）：CAN v4 主链路
 
 CAN 全面接管控制与遥测（协议 v4，见 docs/PROTOCOL.md），USB v2 冻结为备用。
 
-**烟测已验证**：遥测 7 帧全速率（100/50/10/1Hz）、START/STOP 远程门、DRIVE_CMD 流式驱动
-（轮位增量与 SWD 直读 TIM2/TIM4 CNT 逐位一致）、100ms deadman、运动中急停 ISR 快速路径。
+**烟测已验证**：遥测 7 帧全速率、急停 CAN 锁存/ISR 快速路径、CAN 清急停（R50/R52）、
+驱动链路（轮位增量与 SWD 直读 TIM CNT 逐位一致）、deadman、过滤器自愈（R51）。
 
-### ⚠️ Known Issue（R50 修复，冻结不阻塞）
+### 修复史
+- **R51 过滤器自愈 @1Hz**：RX 静默死亡根因 = 运行时 FA1R.FACT0 被清 + FFA1R.FFA0 被置
+  （帧被 ACK 但被过滤器拒收不进 FIFO，SWD 三次稳定读数实锤），自愈整组重配
+- **R52 CAN 清急停跳过 PD3 门**：实测断电后 PD3 读高，把按钮+CAN 清除全拒；
+  开关藏车内难达，远程清除语义要求跳过（保留电池+非 FAULT+fast_req 门）
+- **R54 回退 R53 栈扩容**：4096×4 打爆 FreeRTOS 堆 → 任务创建失败 → 800ms 复位循环
 
-**CAN RX 方向在"按钮清急停"后死亡**（复现 2/2）：清急停短按之后，Jetson 下发的
-SAFETY/DRIVE 帧不再被固件响应（TX 遥测正常、Jetson 侧帧被 ACK），冷启动恢复。
-怀疑方向：sign_store / FLASH 写与 bxCAN RX 中断的互踩（R38 落盘路径 / EXTI 按键路径），
-或 NVIC 优先级配置。规避：出现症状后给下位机断电重启即可恢复。
+### ⚠️ Known Issue #1（R55 待查，冻结不阻塞）
+
+**estop 幽灵再锁存**：CAN 流量期间 estop 数分钟级被重新锁存（3+ 次复现），
+静默 2 分钟不复发。已排除：串口路径（latch_generation=0）、Jetson 残帧、
+按钮长按（PE0 实测高）。怀疑方向：栈溢出踩踏（R53 扩栈尝试因堆耗尽回退，
+需改用 FreeRTOS heap 扩容 + uxTaskGetStackHighWaterMark 实测）或
+car_estop_fast_req 的未知置位者（gdb 硬件观察点 0x200051C1 可抓）。
+规避：出现锁存后用 CAN CLEAR_ESTOP（010#050000000000001C）1 秒内可恢复。
