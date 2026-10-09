@@ -1,6 +1,11 @@
 # CAN 协议 v4 —— 机器可读的信号数据库（单一来源）
-# 规范性文字见 protocol.md；本文件是两端（STM32 C / Jetson Python）+ CI 共同的编码依据。
+# 规范性文字见 protocol.md；本文件是两端（STM32 C / Jetson C++）+ CI 共同的编码依据。
 # 校验与测试向量生成：python3 tools/can_check.py
+#
+# *** FROZEN（2026-10-09 用户拍板）***
+# 自本版起协议内容冻结：此后只做上位机侧功能开发，不再改帧/信号/ID/量化。
+# 确需修订必须走提案流程：先改本 YAML → 两端同步实现 → tools/can_check.py 通过
+# → PROTOCOL.md 同步 → 两 MCU 仓同批提交，缺一不可。
 #
 # 约定：
 #   byte_order: little        -> Intel/小端（低字节在低地址）
@@ -34,20 +39,28 @@ mode_enum: {0: IDLE, 1: REMOTE, 2: ESTOP, 3: FAULT}
 safety_cmd_code:           # SAFETY_CMD.CMD（byte0，低 4 位有效）
   1: START                 # IDLE/FAULT(已复位) -> REMOTE；前提 estop 已清
   2: STOP                  # 受控减速 -> IDLE（可 START 恢复）
-  4: EMERGENCY_STOP        # 立即锁存急停，ISR 快速路径 <=40us 执行；CAN 清除不实现，
-                           # 只能物理短按按钮解除（R43 生产语义，v4 沿用）
-  5: CLEAR_ESTOP           # 规范保留：CAN 侧清除（固件当前不实现，收到即丢弃）
+  4: EMERGENCY_STOP        # 立即锁存急停，ISR 快速路径 <=40us 执行；可经 cmd=5 清除
+  5: CLEAR_ESTOP           # 已实现（R50/R52）：ISR 置请求、1kHz 任务落地；
+                           # 门 = 电池>=10500mV + 非 FAULT + 无快速停请求
+                           # （PD3 使能开关门跳过——开关藏车内难达）
   6: CLEAR_FAULT           # 故障复位（仅当故障条件已消失）
   7: SOFT_RESET            # NVIC_SystemReset；急停锁存跨复位保持
 
 state_bits:                # STATE_u16 位图（DIAG / NODE_INFO 上报）
-  bit0: estop_latched      # 1 = 急停锁存中（只能按钮清除）
+  bit0: estop_latched      # 1 = 急停锁存中（CAN CLEAR_ESTOP 清除；物理按钮禁用，
+                           # PE0 硬件故障——v4 冻结语义，CAN 全权急停）
   bit1: remote_running     # 1 = REMOTE 且电机使能
   bit2: fault_active       # 1 = FAULT
   bit3: cmd_stale          # 1 = DRIVE/ARM 指令断流（deadman 超时）
   bit4: bat_uv             # 1 = 电池欠压（< 10500 mV）
   bit5: can_recovering     # 1 = bus-off 自动恢复中
-  bit6_15: reserved
+  # ---- bit6-10 驱动门自诊断位图（R58 并入，最近一次轮速命令入口的放行链快照）----
+  bit6: dg_remote          # 1 = 远程门开（remote gate 在命令入口为开）
+  bit7: dg_cal             # 1 = 轮标定已签核有效
+  bit8: dg_imu             # 1 = IMU 样本新鲜（芯片在位且 <=20ms）
+  bit9: dg_snapshot        # 1 = 编码器快照 4/4 有效且新鲜
+  bit10: dg_stab           # 1 = 稳定补偿+定点换算完成（命令实际落地）
+  bit11_15: reserved
 
 # deadman / 超时（ms）
 timeout_ms:

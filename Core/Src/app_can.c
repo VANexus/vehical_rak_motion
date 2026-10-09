@@ -135,6 +135,10 @@ static uint16_t state_bitmap(uint8_t busoff_now)
     if (drive_stale != 0U)                 s |= 1U << 3;   /* cmd_stale */
     if (car_battery_mv() < CAR_BATTERY_UV_THRESHOLD_MV) s |= 1U << 4;
     if (busoff_now != 0U)                  s |= 1U << 5;   /* can_recovering */
+    /* [AI] R58/R61: 驱动门自诊断位图并入协议 STATE bit6-10（bit0=远程门
+       bit1=标定 bit2=IMU bit3=快照 bit4=稳定换算；bit11-15 保留），
+       单点定义 docs/protocol-signals.yaml state_bits（v4 冻结版）。 */
+    s |= (uint16_t)((car_drive_gate_dbg & 0x1FU) << 6);
     return s;
 }
 

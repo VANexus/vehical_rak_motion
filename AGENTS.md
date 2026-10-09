@@ -7,8 +7,8 @@ C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘固件。姊妹仓 `veh
 - `CLAUDE.md`：架构与模块划分（启动链、任务表、25 kHz ISR 位置、CubeMX 边界）——本文件不重复其内容
 - `docs/QUICKSTART.md`：两端（Windows / Linux）从装环境到烧录的完整流程 + 常见坑
 - `docs/BOARD-C30D.md`：**引脚与硬件真相**（板载 CAN 收发器在 PD0/PD1；AT8236 无 STBY；无电流采样）
-- `docs/PROTOCOL.md` + `docs/protocol-signals.yaml`：CAN 协议 v3（规范 + 机器可读定义）
-- **进行中，动控制链路前必看**：`docs/ROS2-CONTROL-ARCH.md`（控制契约将改为 4 轮速 + 6 关节位置，**麦轮 IK 移到上位机**，CAN v3 保留备用）；`docs/UART-v1-ALIGN.md`（lease 实发 200 ms，偏离规范 [10,50]，待团队签字）——别按旧契约继续实现
+- `docs/PROTOCOL.md` + `docs/protocol-signals.yaml`：CAN 协议 **v4（规范 + 机器可读定义，2026-10-09 起内容冻结 FROZEN）**——CAN 是唯一主链路，USB v2 冻结备用；确需修订走 YAML→两端实现→`can_check.py`→两 MCU 仓同批提交的提案流程
+- **进行中，动控制链路前必看**：`docs/ROS2-CONTROL-ARCH.md`（控制契约 = 4 轮速 + 7 轴位置，**麦轮 IK 移到上位机**，CAN v4 主链路已落地）；`docs/UART-v1-ALIGN.md`（lease 实发 200 ms，偏离规范 [10,50]，待团队签字）——别按旧契约继续实现
 
 ## 硬性约束
 

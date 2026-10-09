@@ -136,8 +136,9 @@ volatile uint32_t motor_command;   /* SWD/CAN mailbox: 1=run 2=stop 3=cal */
 static uint32_t pwm_arr;           /* [AI] R20: 取自 htim1.Init.Period(6719 = 168e6/25e3-1) */
 static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
+volatile uint8_t car_drive_gate_dbg;   /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-10，协议冻结版） */
 static uint8_t reset_cause;
-const char build_tag[] = "R57";   /* [AI] R54: 回退 R53 栈扩容（4096 打爆 FreeRTOS 堆→任务创建失败→复位循环，uwTick 实测 800ms 循环）；栈溢出假设证伪，幽灵再锁存另查；R52: CAN 清急停跳过 PD3 门（实测断电后 PD3 读高导致所有清除路径被拒；开关藏车内，远程清除语义要求；保留电池+非FAULT+fast_req 门，按钮路径原门不变）；R51: bxCAN 过滤器运行时自愈 @1Hz（RX 静默死亡根因：FA1R.FACT0 被清+FFA1R.FFA0 被置→帧被 ACK 但被过滤器拒收不进 FIFO；SWD 三次稳定读数实锤；与邮箱 ABRQ 自愈同思路）；R50: CAN CLEAR_ESTOP 启用（用户指定：按钮藏车内难按）——0x010 CMD=5 ISR 置请求、1kHz 任务经 car_estop_clear 安全门落地（PD3 使能开关+电池+非 FAULT，与按钮短按同门）；R49: CAN v4 主链路（docs/PROTOCOL.md v4）——app_can.c 重写：下行 0x100 DRIVE_CMD(4×int16 0.01rad/s→urad/s)+0x110/111 ARM_CMD(7×uint16 0.1°→urad, A/B 组齐才落地)+0x010 SAFETY（急停 ISR 快速路径不变，START/STOP 开关 CAN 远程门 can_remote，CLEAR_ESTOP 仍仅按钮）；上行 0x200/201 WHEEL_POS(原始 counts,100Hz)+0x202 WHEEL_SPD(urad/s÷10^4,100Hz)+0x210/211 SERVO_STATE(脉宽→0.1°,50Hz)+0x220 DIAG(10Hz,STATE 位图+MODE+bus-off 计数)+0x030 NODE_INFO(1Hz)；DRIVE 断流 100ms deadman 清零+STATE.bit3；v3 XFER/VEL_FB/NODE_INFO@0x230 作废，can_arm_seen 等恒 0 仅为 UART v1 备用路径编译；新增 car_wheel_positions()/servo_get_pulse() 遥测访问器；R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
+const char build_tag[] = "R61";   /* [AI] R61: CAN v4 冻结版——协议内容冻结（驱动门自诊断位图并入 STATE bit6-10，docs/PROTOCOL.md 标 FROZEN），急停全权走 CAN（R59 按钮 PE0 硬件故障禁用，PROTOCOL §6.1 固化）；R54: 回退 R53 栈扩容（4096 打爆 FreeRTOS 堆→任务创建失败→复位循环，uwTick 实测 800ms 循环）；栈溢出假设证伪，幽灵再锁存另查；R52: CAN 清急停跳过 PD3 门（实测断电后 PD3 读高导致所有清除路径被拒；开关藏车内，远程清除语义要求；保留电池+非FAULT+fast_req 门，按钮路径原门不变）；R51: bxCAN 过滤器运行时自愈 @1Hz（RX 静默死亡根因：FA1R.FACT0 被清+FFA1R.FFA0 被置→帧被 ACK 但被过滤器拒收不进 FIFO；SWD 三次稳定读数实锤；与邮箱 ABRQ 自愈同思路）；R50: CAN CLEAR_ESTOP 启用（用户指定：按钮藏车内难按）——0x010 CMD=5 ISR 置请求、1kHz 任务经 car_estop_clear 安全门落地（PD3 使能开关+电池+非 FAULT，与按钮短按同门）；R49: CAN v4 主链路（docs/PROTOCOL.md v4）——app_can.c 重写：下行 0x100 DRIVE_CMD(4×int16 0.01rad/s→urad/s)+0x110/111 ARM_CMD(7×uint16 0.1°→urad, A/B 组齐才落地)+0x010 SAFETY（急停 ISR 快速路径不变，START/STOP 开关 CAN 远程门 can_remote，CLEAR_ESTOP 仍仅按钮）；上行 0x200/201 WHEEL_POS(原始 counts,100Hz)+0x202 WHEEL_SPD(urad/s÷10^4,100Hz)+0x210/211 SERVO_STATE(脉宽→0.1°,50Hz)+0x220 DIAG(10Hz,STATE 位图+MODE+bus-off 计数)+0x030 NODE_INFO(1Hz)；DRIVE 断流 100ms deadman 清零+STATE.bit3；v3 XFER/VEL_FB/NODE_INFO@0x230 作废，can_arm_seen 等恒 0 仅为 UART v1 备用路径编译；新增 car_wheel_positions()/servo_get_pulse() 遥测访问器；R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */
 /* [AI]  R9 自稳定状态/诊断（非 static: SWD 直读） */
 volatile int32_t  dbg_stab_corr;
 volatile uint16_t dbg_stab_scale = 256U;
@@ -236,6 +237,14 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 static int button_pressed_event(uint32_t now)
 {
+    /* [AI] R59/R61: PE0 实测卡死恒低（GPIOE IDR 全零×8，上拉应读高）——长按误触发
+       急停 + estop_button_release_required 永挂导致按钮/CAN 清锁全被屏蔽。
+       v4 冻结语义（2026-10-09 用户拍板）：按钮急停禁用，CAN SAFETY_CMD(0x010
+       cmd=4/5) 全权接管急停与清急停（docs/PROTOCOL.md §6.1）；按钮硬件修复后
+       删除本 early-return 即恢复原语义。 */
+    (void)now;
+    return 0;
+
     static uint8_t stable;        /* 已消抖的生效电平 */
     static uint8_t raw_prev;
     static uint32_t changed_at;
@@ -1054,6 +1063,12 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
     uint32_t epoch;
     uint64_t sample_us;
 
+    /* [AI] R58/R61: 驱动门自诊断位图（DIAG/NODE_INFO STATE bit6-10 上报，
+       v4 冻结版已纳入协议——docs/protocol-signals.yaml state_bits）：
+       bit0=远程门 bit1=标定 bit2=IMU新鲜 bit3=快照新鲜 bit4=稳定+换算（0 起） */
+    car_drive_gate_dbg = (uint8_t)((enable != 0U ? 1U : 0U) |
+                                   (car_wheel_calibration_ready() != 0U ? 2U : 0U) |
+                                   (imu_sample_fresh(now) != 0 ? 4U : 0U));
     enable = (uint8_t)(enable != 0U && wheel_urad_s != NULL &&
                        car_wheel_calibration_ready() != 0U &&
                        imu_sample_fresh(now) != 0);
@@ -1066,6 +1081,7 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
         enable = (uint8_t)(wheel_control_sample_fresh_from_clock(
                 HAL_GetTick, (uint32_t)(sample_us / 1000ULL),
                 (uint8_t)(sample_us != 0U)));
+        car_drive_gate_dbg = (uint8_t)(car_drive_gate_dbg | (enable != 0U ? 8U : 0U));
     }
     if (enable != 0U) {
         for (unsigned i = 0U; i < MOTOR_COUNT; ++i)
@@ -1075,6 +1091,7 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[MOTOR_COUNT],
             (int32_t)(imu_yaw_rate_dps() * 17.453293f)) &&
             wheel_control_command_to_counts(
                 target_urad_s, &car_wheel_calibration, target_counts_ms));
+        car_drive_gate_dbg = (uint8_t)(car_drive_gate_dbg | (enable != 0U ? 16U : 0U));
     }
     if (enable == 0U) {
         wheel_stabilize_reset();   /* [AI] R46: 稳定链路未走通，清 D 项状态 */

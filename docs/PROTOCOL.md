@@ -3,6 +3,12 @@
 适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘 F407（`vehical_rak_chassis`）。
 **这是两端的通信事实来源**：MCU 侧编解码、Jetson 侧编解码、以及本文的测试向量三者必须逐字节一致。任何一方改协议，必须先改 [`protocol-signals.yaml`](protocol-signals.yaml) 并重跑 `tools/can_check.py`。
 
+> **★ 协议已冻结（FROZEN，2026-10-09 用户拍板）★**
+> 自本版起**不再改帧/信号/ID/量化**。此后只做上位机侧功能开发——所有已规划功能
+> （ros2_control 臂 7 轴、夹爪、TUI、导航上层）均已可在本协议帧集内实现。
+> 确需修订走提案流程：YAML → 两端同步实现 → `can_check.py` → 本文同步 → 两 MCU 仓同批提交。
+> 已实现状态：**R49-R61 固件全帧集已上板，Jetson `CanSession` 全帧收发对齐**（见 §9）。
+
 > **v4 相对 v3 的定位变化（2026-10-09 已定，不再开洞）**
 > 1. **CAN 是唯一主链路**：所有控制与遥测（安全门、4 轮速指令、7 轴舵机、全量遥测）全部走 CAN；**USB v2 串口降级为备用链路**，帧格式冻结不变（见 §10）。
 > 2. **单节点拓扑**：机械臂板已烧毁退役，v3 的底盘↔机械臂互锁层（`XFER_*`）整体作废。
@@ -106,7 +112,7 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `JxANG`/`GRIP` | 16 uint16 | **0.1** | 0…2700 (0…270°) | deg | 舵机角。0.1° 对齐舵机 PWM 物理分辨率（7.4 µs/° ≈ 0.07°），0.01° 是伪精度；全部无符号（0-270° 行程，Home 位见 §6.4） |
 | `BAT_MV` | 16 uint16 | 1 | 0…65535 | mV | 电池电压。**欠压阈值 10500 mV**（实测定的硬约束） |
 | `FAULT` | 16 uint16 | — | 见 §7 | — | 0 = 无故障 |
-| `STATE` | 16 uint16 | — | 位图 | — | `bit0 estop_latched`、`bit1 remote_running`、`bit2 fault_active`、`bit3 cmd_stale`、`bit4 bat_uv`、`bit5 can_recovering`、bit6-15 保留 |
+| `STATE` | 16 uint16 | — | 位图 | — | `bit0 estop_latched`、`bit1 remote_running`、`bit2 fault_active`、`bit3 cmd_stale`、`bit4 bat_uv`、`bit5 can_recovering`、**`bit6-10 驱动门自诊断`**（`bit6 dg_remote` 远程门、`bit7 dg_cal` 轮标定有效、`bit8 dg_imu` IMU 样本新鲜、`bit9 dg_snapshot` 编码器快照 4/4 新鲜、`bit10 dg_stab` 稳定补偿+换算完成——最近一次轮速命令入口的放行链快照）、bit11-15 保留 |
 | `MODE` | 8 uint8 | — | mode 枚举 | — | 0 IDLE / 1 REMOTE / 2 ESTOP / 3 FAULT |
 | `BUSOFF_CNT` | 8 uint8 | 1 | 0…255（饱和） | — | bus-off 累计计数，健康度指标 |
 | `PROTO`/`HWREV`/`BUILD` | 8/8/16 | — | — | — | 协议版本（本文=4）/ 硬件版本 / git short hash 折 16 位 |
@@ -124,12 +130,13 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | 0x1 | `START` | IDLE/FAULT(已复位)→REMOTE（前提 estop 已清） |
 | 0x2 | `STOP` | 受控减速到 IDLE（可 START 恢复） |
 | 0x4 | `EMERGENCY_STOP` | **立即锁存急停**：25 kHz ISR 下一周期（≤40 µs）执行四轮动态刹车 |
-| 0x5 | `CLEAR_ESTOP` | **规范保留**。⚠️ 固件（R43 起生产语义）**故意不实现 CAN 清除**——清急停必须**物理短按按钮**（确认人在车边）。收到即丢弃 |
+| 0x5 | `CLEAR_ESTOP` | **已实现（R50/R52）**：ISR 置请求，1 kHz 任务经安全门落地。门 = 电池 ≥10500 mV + 非 FAULT + 无快速停请求；PD3 使能开关门跳过（开关藏车内难达，远程清除语义） |
 | 0x6 | `CLEAR_FAULT` | 故障复位（仅当故障条件已消失） |
 | 0x7 | `SOFT_RESET` | `NVIC_SystemReset`；急停锁存**跨复位保持** |
 
 - **急停路径不经过任务调度**：`0x010` 在 CAN 接收中断里校验 CRC（DID 种子）→ 置标志 → 25 kHz ISR ≤40 µs 执行刹车。全链路响应预算 **≤1 ms**。
 - **CRC 校验失败 / CMD 非法**：丢弃并计数，绝不部分执行。
+- **急停语义（v4 冻结版）**：急停的置位与清除**全权走 CAN `SAFETY_CMD`**。物理按钮（PE0）因实测硬件故障（恒低卡死）**禁用**，按钮固件路径保留、硬件修复后可恢复；舵机不受急停影响（保持当前位置），急停只作用于轮驱动。
 
 ### 6.2 deadman 与超时
 
@@ -146,8 +153,8 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 ```
 IDLE --START--> REMOTE --STOP/断流--> IDLE
   |                |
-  +--ESTOP(锁存)---+--ESTOP(锁存)      ESTOP --按钮短按--> IDLE
-  |                |
+  +--ESTOP(锁存)---+--ESTOP(锁存)      ESTOP --CAN CLEAR_ESTOP--> IDLE
+  |                |                   （物理按钮禁用：PE0 硬件故障，v4 冻结语义）
   +--FAULT--+ <----+                    FAULT --CLEAR_FAULT(条件消失)--> IDLE
 ```
 
@@ -209,12 +216,11 @@ python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_proto
 
 必测边界用例（两端各自跑）：负数饱和、int32 回绕前后值、轮速 0.01 rad/s 分辨率舍入、保留位非零拒收、`SAFETY_CMD` CRC 篡改拒收（**已有实测**：2026-10-09 联调中 CRC 用错 DID 种子的急停帧被固件正确丢弃）。
 
-## 9. 实测基线（2026-10-09 首次联调，v3 帧格式）
+## 9. 实测基线
 
-- Jetson can0（mttcan + SN65HVD230）↔ 底盘 R44，1 Mbps：上行 `0x030`@1kHz + `0x200`@100Hz + `0x230` 连续 3 秒无错帧，counter 连续、CRC 全对。
-- 下行急停帧（CRC 合法）经 SWD 读 RAM 验证：`estop_latched=1`、`mode=ESTOP`，落入 25 kHz ISR 快速路径。
-- 根因记录：CANH/CANL 某一端反接 → 全哑 + 临界抖动；对调后全通。
-- **v4 帧格式尚未有固件实现**（见 §10 待办），上表 v4 向量是规范值，待 R45 上板后按 §8 边界用例复测。
+- **2026-10-09 首次联调（v3 帧格式）**：Jetson can0（mttcan + SN65HVD230）↔ 底盘 1 Mbps，上行连续 3 秒无错帧；急停帧（CRC 合法）经 SWD 读 RAM 验证落入 25 kHz ISR 快速路径（`estop_latched=1`、`mode=ESTOP`）。根因记录：CANH/CANL 某一端反接 → 全哑 + 临界抖动；对调后全通。两节点 GND 未互联会造成"偶发收得到、大量 bus-off"。
+- **R49-R61（v4 帧格式）**：固件全帧集实现并上板；Jetson `CanSession` 按 v4 实现下行 `DRIVE_CMD@100Hz`+`SAFETY_CMD`（e2e CRC/counter）与上行 `WHEEL_POS/SPD/DIAG/NODE_INFO` 接收；`ARM_CMD_A/B` 发送与 `SERVO_STATE_A/B` 接收在冻结版同步补齐（Session API 层）。实测数据按 §8 边界用例随台架复测记录（AGENTS.md §5 规矩）。
+- **链路层基线**：Jetson `can0` = mttcan @50 MHz，`bitrate 1000000 sample-point 0.810 restart-ms 100`（与底盘 81.0 % 采样点对齐，`can0-up.service` 持久化）；底盘 = HSE 8 MHz → PCLK1 42 MHz / BRP2 / 21 tq，精确 1.000 Mbps。
 
 ## 10. 已定决定与待办
 
@@ -227,20 +233,24 @@ python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_proto
 | 3 | v3 全量作废（互锁层随臂板退役），v4 重写 ID 表 |
 | 4 | 指令频率：DRIVE 100 Hz、ARM 50 Hz；遥测 100/50/10 Hz——总线负载 ~7 % |
 | 5 | 电池欠压 10500 mV 沿用为硬约束（安全层拒绝 ARMED 轮命令） |
+| 6 | **协议内容冻结（FROZEN）**：驱动门自诊断位图（STATE bit6-10）为最后一项内容修订；急停置位/清除全权走 CAN（按钮 PE0 硬件故障禁用，语义见 §6.1） |
+| 7 | **舵机命令不受固件远程门/急停门控**（`car_arm_command_urad` 直接落地）——ARM 指令的许可与发送时机**由 Jetson 侧负责**（`CanSession` 仅在 `motion_enabled` 且有新目标时发送）；这是两端的分工契约，不是疏漏 |
 
-### 10.2 固件侧待办（R45，底盘仓）
+### 10.2 固件侧（R45→R61，✅ 已完成）
 
-1. `app_can.c` 按 v4 重写编解码（参考 `docs/gen/can_protocol.h`），删除 XFER/EMCY_ARM；`0x010` 快速路径保留（CRC 种子改 DID 0x01 不变，向量 V1 与 v3 兼容）。
-2. cantx 任务改发 `WHEEL_POS_A/B` + `WHEEL_SPD`（100 Hz）+ `SERVO_STATE_A/B`（50 Hz）+ `DIAG`（10 Hz）+ `NODE_INFO`（1 Hz）。
-3. canrx 任务解析 `DRIVE_CMD`（4×int16 0.01 rad/s → 轮速目标，接原 `car_can_velocity` 路径）与 `ARM_CMD_A/B`（0.1° → `servo_set_pulse`）。
-4. deadman：`DRIVE_CMD` 100 ms / `ARM_CMD` 100 ms；`DIAG` 增加 `BUSOFF_CNT`。
-5. **Build tag 升 R45**；上板按 §8 边界用例复测并记录实测数据（AGENTS.md §5 规矩）。
+1. ✅ `app_can.c` 按 v4 重写编解码，XFER/EMCY_ARM 已删除；`0x010` 快速路径保留（CRC 种子 DID 0x01，向量 V1 兼容）。
+2. ✅ cantx 任务发 `WHEEL_POS_A/B` + `WHEEL_SPD`（100 Hz）+ `SERVO_STATE_A/B`（50 Hz）+ `DIAG`（10 Hz）+ `NODE_INFO`（1 Hz），相位错开防邮箱挤爆。
+3. ✅ canrx 任务解析 `DRIVE_CMD`（接 `car_wheel_command_urad` 路径）与 `ARM_CMD_A/B`（凑齐 A/B 组落地 `servo_set_pulse`）。
+4. ✅ deadman：`DRIVE_CMD` 100 ms / `ARM_CMD` 100 ms；`DIAG` 含 `BUSOFF_CNT` 与 STATE bit6-10 驱动门自诊断。
+5. ✅ R50/R52：CAN `CLEAR_ESTOP` 启用（§6.1 门）；R51/R56：过滤器/RX 通知运行时自愈 @1 Hz；R57：过滤器寄存器偏移修正。
+6. ✅ R59：按钮急停禁用（PE0 硬件故障），CAN 全权语义（§6.1）。
 
-### 10.3 Jetson 侧待办（`rak` 仓）
+### 10.3 Jetson 侧（`rak` 仓，冻结版状态）
 
-1. 新增 CAN 主机节点（`python-can` + SocketCAN），编解码以 `protocol-signals.yaml` 为准。
-2. `rak_hardware` SystemInterface 切 CAN 传输层（4 轮速 + 7 关节位置契约不变）。
-3. TUI（`rak_drive_tui` / `rak_arm_tui`）增加 CAN 后端；串口后端保留为备用。
+1. ✅ CAN 传输后端：`src/rak_chassis` `CanSession`（SocketCAN），与 `SerialSession` 同 `Session` API，`transport:=usb|can` 工厂切换。
+2. ✅ 冻结版补齐：`set_arm_command`（7 轴 rad → 0x110/111，0.1° 量化）+ `SERVO_STATE_A/B` 订阅解析进 `SessionSnapshot`——**Session 通信能力与协议帧集完全对齐**。
+3. ✅ `rak_system`（ros2_control SystemInterface）4 轮 velocity/pos-vel 接口已接 CAN 后端。
+4. ⬜ 上位机**功能级**待办（均不需要动协议）：ros2_control 臂 7 轴 position 接口 + `joint_trajectory_controller` 接线；TUI（`rak_commissioning`）CAN 后端；`EMCY(0x020)` 事件帧两端按需启用（DIAG 已覆盖故障上报，帧定义保留）。
 
 ### 10.4 版本共存约定
 

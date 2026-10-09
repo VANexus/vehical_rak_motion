@@ -38,6 +38,7 @@ void car_wheel_command_urad(const int32_t wheel_urad_s[CAR_MOTOR_COUNT],
                             uint8_t enable, uint32_t now);
 uint8_t car_estop_clear(void);          /* [AI] 仅清锁成功返回非零；由 USB v2 DRIVE clear 调用 */
 uint8_t car_estop_clear_can(void);      /* [AI] R52: CAN 清急停（跳过 PD3 门，其余同按钮路径） */
+extern volatile uint8_t car_drive_gate_dbg; /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-9） */
 /* [AI] R42: USB v2 ARM 命令落地(7 轴位置)。
    轴序单点定义: axis[0..6] = J1(腰,PB15) J2(大臂,PB14) J3(肘,PC9) J4(小臂,PC8)
    J5(腕俯仰,PC7) J6(腕圆周,PC6) 夹爪(暂无通道)。
