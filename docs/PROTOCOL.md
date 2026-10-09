@@ -222,6 +222,7 @@ python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_proto
 - **2026-10-09 首次联调（v3 帧格式）**：Jetson can0（mttcan + SN65HVD230）↔ 底盘 1 Mbps，上行连续 3 秒无错帧；急停帧（CRC 合法）经 SWD 读 RAM 验证落入 25 kHz ISR 快速路径（`estop_latched=1`、`mode=ESTOP`）。根因记录：CANH/CANL 某一端反接 → 全哑 + 临界抖动；对调后全通。两节点 GND 未互联会造成"偶发收得到、大量 bus-off"。
 - **R49-R63（v4 帧格式）**：固件全帧集实现并上板；Jetson `CanSession` 按 v4 实现下行 `DRIVE_CMD@100Hz`+`SAFETY_CMD`（e2e CRC/counter）与上行 `WHEEL_POS/SPD/DIAG/NODE_INFO` 接收；`ARM_CMD_A/B` 发送与 `SERVO_STATE_A/B` 接收在冻结版同步补齐（Session API 层）。实测数据按 §8 边界用例随台架复测记录（AGENTS.md §5 规矩）。
   - **2026-10-09 全链路实测**：安全冒烟 10/10（START→REMOTE、急停 ISR 快速路径、坏 CRC 拒收、CLEAR_ESTOP、STOP）；驱动门自诊断位图 bit6-10 实时点亮验证（零目标 DRIVE 全链放行、deadman 断流回收）；生产路径 e2e（`rak/scripts/can_session_e2e.cpp`，经 CanSession 与 ros2_control 同一代码路径）ARM 命令 Home 位与 SERVO_STATE 读回逐轴一致。
+  - **2026-10-09 全动作域实测**（四轮架空、臂周清空前提）：臂 J1-J6 全行程逐轴扫描 0-270° 回读一致（±2°）+ 夹爪命令域契约（回读恒 0）+ 回 Home（`rak/scripts/can_full_motion_test.cpp`）；麦轮四类轮速组合（前进/横移/旋转/斜航/±2 rad/s）符号与通路全部正确落地，稳态跟踪 ±8 %（3 rad/s）——低速（1 rad/s）存在 ~2 s 静摩擦突破期，属轮 PI/判向**调参项，非协议**（`rak/scripts/wheel_track_probe.cpp` 归档）。MoveIt 冻结契约见 rak 仓 `docs/arm_moveit_contract.md`。
   - **R62/R63 ARM 量化勘误**：R49 起 ARM_CMD 0.1°→µrad 因子写成 ×174.533（少 10 倍，命令角缩至 1/10）；R62 修正因子后 int32 乘法在 raw>1230（>123°）溢出回绕；R63 改 int64 中间量终修。协议/YAML 语义本身无误，纯固件实现勘误——CAN ARM 路径在此次 e2e 前从未做非零实测。
 - **链路层基线**：Jetson `can0` = mttcan @50 MHz，`bitrate 1000000 sample-point 0.800 restart-ms 100`（mttcan 采样点粒度 2 %，0.810 不可达、实配 0.800——见 §1 勘误；`can0-up.service` 持久化）；底盘 = HSE 8 MHz → PCLK1 42 MHz / BRP2 / 21 tq，精确 1.000 Mbps、采样点 81.0 %。
 
