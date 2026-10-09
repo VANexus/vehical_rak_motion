@@ -52,10 +52,12 @@
 
 /* [AI] v4 量化常数（协议单点定义在 YAML，换算处集中在此）
    DRIVE_CMD: int16 × 0.01 rad/s → 内部 urad/s：×10^4
-   ARM_CMD:   uint16 × 0.1°   → 内部 urad  ：°→urad = ×17453.3 → raw×174533/1000
+   ARM_CMD:   uint16 × 0.1°   → 内部 urad  ：0.1° = 1745.33 urad → raw×1745333/1000
    WHEEL_SPD: 内部 urad/s → 0.01 rad/s：÷10^4 */
 #define DRIVE_URAD_PER_LSB   10000L
-#define ARM_URAD_NUM      174533L
+#define ARM_URAD_NUM     1745333L   /* [AI] R62: R49 起因子少 10 倍（174.533）——
+                                       命令角缩至 1/10，生产路径 e2e 实测暴露
+                                       （命令 Home 225° 实动 22.4°）；协议/遥测侧无误 */
 #define ARM_URAD_DEN        1000L
 #define SPD_URAD_PER_LSB   10000L
 
@@ -262,14 +264,16 @@ void can_rx_task_step(void)
         int32_t p[7];
         if (f.id == CID_ARM_CMD_A) {
             for (unsigned i = 0; i < 4U; ++i) {
-                pending[i] = (int32_t)get_le16(&f.data[i * 2U]) *
-                             ARM_URAD_NUM / ARM_URAD_DEN;
+                /* [AI] R63: int64 中间量——R62 的 1745333 因子使 int32 乘法在
+                   raw>1230（>123°）溢出回绕（e2e 实测 270°→23.8°）；结果域 ≤4.72e6 仍在 int32。 */
+                pending[i] = (int32_t)((int64_t)get_le16(&f.data[i * 2U]) *
+                                       ARM_URAD_NUM / ARM_URAD_DEN);
             }
             have_a = 1U;
         } else {
             for (unsigned i = 0; i < 3U; ++i) {
-                pending[4U + i] = (int32_t)get_le16(&f.data[i * 2U]) *
-                                  ARM_URAD_NUM / ARM_URAD_DEN;
+                pending[4U + i] = (int32_t)((int64_t)get_le16(&f.data[i * 2U]) *
+                                            ARM_URAD_NUM / ARM_URAD_DEN);
             }
             have_b = 1U;
         }
