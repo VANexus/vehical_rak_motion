@@ -25,7 +25,8 @@
 - **两个节点 GND 必须互联**（第三根线）：差分接收器的共模参考。缺地时表现为"偶发收得到、大量 bus-off"的临界总线——2026-10-09 联调实测。
 - 底盘侧：板载收发器，**PD0=CAN1_RX、PD1=CAN1_TX**（`docs/board-c30d.md` §2）。1 Mbps 位时序 = PCLK1 42 MHz / BRP2 / 21 tq（BS1=16, BS2=4）= 精确 1.000 Mbps，采样点 81.0 %。**时钟必须来自 HSE 8 MHz**（用 HSI 会出现偶发 bus-off 玄学故障）。
 - Jetson 侧：mttcan（`c310000.mttcan`，50 MHz 时钟）+ 外置 **SN65HVD230**（3.3 V 器件，可直连 Orin）。
-  推荐配置：`ip link set can0 type can bitrate 1000000 sample-point 0.810 restart-ms 100`（采样点对齐底盘的 81 %，restart-ms 自动从 bus-off 恢复）。
+  实配：`ip link set can0 type can bitrate 1000000 sample-point 0.800 restart-ms 100`（`can0-up.service` 持久化）。
+  ⚠️ **采样点勘误（实测）**：mttcan @50 MHz 在 1 Mbps 下每 bit 恰 50 tq，采样点粒度 2 %——规范曾写 0.810，但驱动就近取整后**实际生效 0.800**。与底盘 81.0 % 差 1.0 pp，在 CAN 容限内，整场联调（97 万+ 帧）零错误帧。排查位时序问题时以 `ip -details link show can0` 实际读数为准。
 - ⚠️ **接线极性是历史事故点**：模块丝印与底盘端子标注可能不一致。上电先量隐性电平（H≈L≈2.5 V），通不上第一件事对调 H/L 试一次（2026-10-09 的根因就是对调后立即全通）。
 
 ## 2. 帧约定：raw8 与 e2e（v4 的关键简化）
@@ -220,7 +221,7 @@ python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_proto
 
 - **2026-10-09 首次联调（v3 帧格式）**：Jetson can0（mttcan + SN65HVD230）↔ 底盘 1 Mbps，上行连续 3 秒无错帧；急停帧（CRC 合法）经 SWD 读 RAM 验证落入 25 kHz ISR 快速路径（`estop_latched=1`、`mode=ESTOP`）。根因记录：CANH/CANL 某一端反接 → 全哑 + 临界抖动；对调后全通。两节点 GND 未互联会造成"偶发收得到、大量 bus-off"。
 - **R49-R61（v4 帧格式）**：固件全帧集实现并上板；Jetson `CanSession` 按 v4 实现下行 `DRIVE_CMD@100Hz`+`SAFETY_CMD`（e2e CRC/counter）与上行 `WHEEL_POS/SPD/DIAG/NODE_INFO` 接收；`ARM_CMD_A/B` 发送与 `SERVO_STATE_A/B` 接收在冻结版同步补齐（Session API 层）。实测数据按 §8 边界用例随台架复测记录（AGENTS.md §5 规矩）。
-- **链路层基线**：Jetson `can0` = mttcan @50 MHz，`bitrate 1000000 sample-point 0.810 restart-ms 100`（与底盘 81.0 % 采样点对齐，`can0-up.service` 持久化）；底盘 = HSE 8 MHz → PCLK1 42 MHz / BRP2 / 21 tq，精确 1.000 Mbps。
+- **链路层基线**：Jetson `can0` = mttcan @50 MHz，`bitrate 1000000 sample-point 0.800 restart-ms 100`（mttcan 采样点粒度 2 %，0.810 不可达、实配 0.800——见 §1 勘误；`can0-up.service` 持久化）；底盘 = HSE 8 MHz → PCLK1 42 MHz / BRP2 / 21 tq，精确 1.000 Mbps、采样点 81.0 %。
 
 ## 10. 已定决定与待办
 
