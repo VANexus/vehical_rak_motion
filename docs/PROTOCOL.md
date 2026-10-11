@@ -1,6 +1,6 @@
 # CAN 通信协议 v4（两端对接规范，规范性文档）
 
-适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘 F407（`vehical_rak_chassis`）。
+适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘 F407（`vehical_rak_motion`）。
 **这是两端的通信事实来源**：MCU 侧编解码、Jetson 侧编解码、以及本文的测试向量三者必须逐字节一致。任何一方改协议，必须先改 [`protocol-signals.yaml`](protocol-signals.yaml) 并重跑 `tools/can_check.py`。
 
 > **★ 协议已冻结（FROZEN，2026-10-09 用户拍板）★**
@@ -12,7 +12,7 @@
 > **v4 相对 v3 的定位变化（2026-10-09 已定，不再开洞）**
 > 1. **CAN 是唯一主链路**：所有控制与遥测（安全门、4 轮速指令、7 轴舵机、全量遥测）全部走 CAN；**USB v2 串口降级为备用链路**，帧格式冻结不变（见 §10）。
 > 2. **单节点拓扑**：机械臂板已烧毁退役，v3 的底盘↔机械臂互锁层（`XFER_*`）整体作废。
-> 3. **控制契约沿用 ros2-control 架构**：4 轮速 + 7 轴（6 关节 + 1 夹爪）位置，麦轮 IK 在 Jetson 侧（见 `vehical_rak_chassis/docs/ROS2-CONTROL-ARCH.md`）。
+> 3. **控制契约沿用 ros2-control 架构**：4 轮速 + 7 轴（6 关节 + 1 夹爪）位置，麦轮 IK 在 Jetson 侧（见 `vehical_rak_motion/docs/ROS2-CONTROL-ARCH.md`）。
 
 术语：**必须**=强制；**应**=强烈建议，偏离需写明理由；**可**=可选。
 

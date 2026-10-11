@@ -6,8 +6,8 @@
 
 ## 0. 这个仓库是什么
 
-`vehical_rak_chassis` = 麦轮**底盘**的 STM32F407VET6 固件（轮趣 C30D 一体板）。
-同硬件的姊妹仓是 `vehical_rak_arm`（机械臂），上位机是 `rak`（Jetson/ROS 2）。三者靠 **CAN 2.0A @1 Mbps** 协作，协议见 [`docs/PROTOCOL.md`](PROTOCOL.md)。
+`vehical_rak_motion` = 麦轮**底盘**的 STM32F407VET6 固件（轮趣 C30D 一体板）。
+同硬件的姊妹仓是 `vehical_rak_edge_ai`（边缘 AI，跑 BNN/SNN），上位机是 `rak`（Jetson/ROS 2）。三者靠 **CAN 2.0A @1 Mbps** 协作，协议见 [`docs/PROTOCOL.md`](PROTOCOL.md)。
 
 **当前进度**：CubeMX 骨架能编译（Debug/Release 双预设，0 警告），**应用代码 0 行**，外设一个都没配。别期待板上已有闭环行为。
 
@@ -39,7 +39,7 @@
 ```bash
 cmake --preset Debug && cmake --build --preset Debug
 cmake --preset Release && cmake --build --preset Release
-# 产物：build/Debug/vehical_rak_chassis.{elf,hex,bin,map}
+# 产物：build/Debug/vehical_rak_motion.{elf,hex,bin,map}
 ```
 
 当前基线（改动后应能对上数量级）：Debug FLASH 16 140 B（3.08 %）/ RAM 43 400 B（33.11 %）。
@@ -50,7 +50,7 @@ cmake --preset Release && cmake --build --preset Release
 ## 4. 烧录
 
 ```bash
-STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_chassis.hex -v -rst
+STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_motion.hex -v -rst
 ```
 
 - Linux：ST-LINK 的 udev 规则已在 `/etc/udev/rules.d/49-stlinkv2*.rules`，用户在 `dialout` 组，插上即用。

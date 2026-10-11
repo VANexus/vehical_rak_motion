@@ -1,6 +1,6 @@
 # AGENTS.md — 本仓工作约束（底盘 MCU 固件）
 
-C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘固件。姊妹仓 `vehical_rak_arm` 是**同一块板子**的机械臂角色，上位机是 `VANexus/rak`（Jetson）。
+C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘 + 机械臂运动控制固件。姊妹仓 `vehical_rak_edge_ai` 是**同一块板子**的边缘 AI 角色（跑 BNN/SNN），上位机是 `VANexus/rak`（Jetson）。
 
 ## 先读
 
@@ -28,7 +28,7 @@ C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘固件。姊妹仓 `veh
 . ./env/activate.sh            # Linux（Windows 用 . .\env\activate.ps1；只需 STM32CubeCLT 1.22.0）
 cmake --preset Debug   && cmake --build --preset Debug     # 还要跑 Release
 cmake --preset Release && cmake --build --preset Release
-STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_chassis.hex -v -rst
+STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_motion.hex -v -rst
 python3 tools/can_check.py            # 动了协议就必须通过（退出码 0）；需要 PyYAML
 python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段
 python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手改）
@@ -42,4 +42,4 @@ bash tools/cubemx_lint.sh             # 动了 .ioc / 外设就必须通过（�
 - 新 `.c/.h` 加进**顶层** `CMakeLists.txt`（`cmake/stm32cubemx/` 那份会被 CubeMX 覆盖）；只往 `USER CODE BEGIN/END` 标记对之间写。
 - CubeMX 重生成后必查（完整清单见 `docs/CUBEMX-SOP.md` §三第 3 步）：`stm32f4xx_it.c` 不得恢复 SVC/PendSV/SysTick 三个 handler；`SystemClock_Config` 的 HSE 设置是否被抹回 HSI；**`main.c` 的 `USER CODE BEGIN 2` 是否排在所有外设 `MX_*_Init()` 之后**；`.ioc` 里启用的每个外设是否都有对应的 `MX_*_Init()`（R20 就漏过 TIM2/TIM5/USART3）。`bash tools/cubemx_lint.sh` 覆盖了其中大部分。
 - 提交前：Debug + Release 零警告 + `can_check.py` 通过（动了协议）+ `cubemx_lint.sh` 通过（动了外设）。开工先 `git pull`，收工就 push。
-- 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_arm` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。
+- 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_edge_ai` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。

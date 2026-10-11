@@ -45,7 +45,7 @@
 
 | 文件 | 归属 | 规则 |
 | --- | --- | --- |
-| `vehical_rak_chassis.ioc` | **真源** | 只通过 CubeMX 改（GUI 或无头脚本），不手改文本 |
+| `vehical_rak_motion.ioc` | **真源** | 只通过 CubeMX 改（GUI 或无头脚本），不手改文本 |
 | `Core/Src/{main,gpio,freertos,adc,can,dma,iwdg,tim,usart,stm32f4xx_it,stm32f4xx_hal_msp,stm32f4xx_hal_timebase_tim}.c`<br>`Core/Inc/{main,gpio,adc,can,dma,iwdg,tim,usart,stm32f4xx_it,stm32f4xx_hal_conf,FreeRTOSConfig}.h`<br>`cmake/stm32cubemx/CMakeLists.txt`<br>`cmake/gcc-arm-none-eabi.cmake` | **生成物** | **只往 `/* USER CODE BEGIN xxx */ … /* USER CODE END xxx */` 之间写**。块外的任何改动都会在下次生成时丢失 |
 | `Core/Src/app_*.c`、`Core/Inc/app_*.h` | **我们的** | 随便写。但**不许**写外设初始化寄存器 |
 | `CMakeLists.txt`（顶层） | **我们的** | 只生成一次，不覆盖。新增 `app_*.c` 加进这里的 `target_sources` |
@@ -136,7 +136,7 @@ CubeMX 6 的 `-q` 脚本模式有一整套命令。**这是官方机器接口，
 
 ```bash
 cat > /tmp/gen.txt <<'EOF'
-config load /绝对路径/vehical_rak_chassis.ioc
+config load /绝对路径/vehical_rak_motion.ioc
 <命令…>
 project generate
 exit
@@ -163,7 +163,7 @@ timeout 300 /home/xrak/STM32CubeMX/STM32CubeMX -q /tmp/gen.txt
 ### 实战示例（R20 用的就是这几条）
 
 ```
-config load .../vehical_rak_chassis.ioc
+config load .../vehical_rak_motion.ioc
 set mode TIM2 Encoder_Interface                  # 激活 TIM2 编码器模式
 set ip parameters USART3 BaudRate 921600         # 改 USART3 波特率
 project generate

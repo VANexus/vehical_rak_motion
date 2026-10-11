@@ -68,7 +68,7 @@ init_for() {
         *)           echo "MX_${1}_Init" ;;
     esac
 }
-IPS=$(grep -oE '^Mcu\.IP[0-9]+=.*' vehical_rak_chassis.ioc 2>/dev/null | cut -d= -f2 | sort -u)
+IPS=$(grep -oE '^Mcu\.IP[0-9]+=.*' vehical_rak_motion.ioc 2>/dev/null | cut -d= -f2 | sort -u)
 INITS=$(grep -oE 'MX_[A-Z0-9_]+_Init\(\)' Core/Src/main.c 2>/dev/null | sed 's/()//' | sort -u)
 missing=""
 for ip in $IPS; do

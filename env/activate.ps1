@@ -6,7 +6,7 @@
 #
 # 作用：把 STM32CubeCLT 的编译器 / cmake / ninja / 烧录工具前置到 $env:PATH，
 # 之后两个工程都用同一套命令（与 Linux 完全一致）：
-#   cd vehical_rak_chassis; cmake --preset Debug; cmake --build --preset Debug
+#   cd vehical_rak_motion; cmake --preset Debug; cmake --build --preset Debug
 #
 # ⚠️ 本脚本在 Linux 上编写，未在 Windows 实机验证过；Windows 成员首次执行请核对
 #    打印出来的路径与版本。探测顺序若与你的安装位置不符，直接传参指定：

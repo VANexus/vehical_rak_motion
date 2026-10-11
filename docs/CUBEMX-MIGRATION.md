@@ -17,10 +17,10 @@
 
 ```bash
 git checkout cubemx-standard-migration      # 已建好
-cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
+cp vehical_rak_motion.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 ```
 
-打开 CubeMX → `File > Load Project` → 选 `vehical_rak_chassis.ioc`。
+打开 CubeMX → `File > Load Project` → 选 `vehical_rak_motion.ioc`。
 
 **建议按顺序配**：时钟树 → 外设 → NVIC → Project Manager。
 
@@ -300,7 +300,7 @@ cp vehical_rak_chassis.ioc /tmp/ioc.bak     # CubeMX 会就地改写 .ioc
 | 项 | 值 |
 | --- | --- |
 | Toolchain / IDE | **CMake**（保持） |
-| Project Name / Location | 保持 `vehical_rak_chassis` / 当前目录 |
+| Project Name / Location | 保持 `vehical_rak_motion` / 当前目录 |
 | Application Structure | Advanced |
 
 **Code Generator 标签页**

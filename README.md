@@ -1,4 +1,4 @@
-# vehical_rak_chassis — 麦轮底盘固件（STM32F407VET6 / C30D）
+# vehical_rak_motion — 底盘 + 机械臂运动控制固件（STM32F407VET6 / C30D）
 
 > 架构依据：[`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md)。
 > 臂板烧毁后只剩本板，目标由上位机经 `ros2_control` 控制 4 轮、6 轴机械臂
@@ -23,7 +23,7 @@
 本目录是**独立 git 仓**（可单独 clone、单独构建，`Drivers/` 与 `Middlewares/` 已纳入版本库）：
 
 ```
-vehical_rak_chassis/
+vehical_rak_motion/
 ├── README.md              本文件：现状、外设待配、模块划分
 ├── docs/QUICKSTART.md     快速上手（先读这个）
 ├── docs/QUICKSTART.md      快速上手（跨端）
@@ -42,7 +42,7 @@ vehical_rak_chassis/
 
 ---
 
-**远端**：`https://github.com/VANexus/vehical_rak_chassis`（private，默认分支 `main`，团队 `RAK-嵌入式开发组` 有 maintain 权限）。
+**远端**：`https://github.com/VANexus/vehical_rak_motion`（private，默认分支 `main`，团队 `RAK-嵌入式开发组` 有 maintain 权限）。
 协作三步：**开工先 `git pull`** → 改动 → **收工 `git add -A && git commit && git push`**；提交前本仓必须 `python3 tools/can_check.py` 与 `cmake --build --preset Debug` 双双零问题。
 
 ---
@@ -72,11 +72,11 @@ vehical_rak_chassis/
 # ② 构建
 cmake --preset Debug && cmake --build --preset Debug
 cmake --preset Release && cmake --build --preset Release
-# 产物：build/<预设>/vehical_rak_chassis.{elf,hex,bin} + .map
+# 产物：build/<预设>/vehical_rak_motion.{elf,hex,bin} + .map
 # hex/bin 由顶层 CMakeLists.txt 的 POST_BUILD 生成（CubeMX 不生成这两样）
 
 # ③ 烧录（两端同一个 CLI）
-STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_chassis.hex -v -rst
+STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_motion.hex -v -rst
 ```
 
 `build/`、`cmake-build-*/` 属生成物，已在根 `.gitignore` 里排除。
@@ -98,7 +98,7 @@ Linux 上 udev 规则（`49-stlinkv2*.rules`）已存在，`dialout` 组已加�
 | 链接脚本 | `STM32F407xx_FLASH.ld`：FLASH 512 K / RAM 128 K / CCMRAM 64 K，`_estack` = RAM 顶 |
 | GPIO 初始化 | `MX_GPIO_Init()` 只使能 GPIOH/GPIOA 时钟，**按键、LED、OLED 引脚一个都没配** |
 
-⚠️ 本工程与 `vehical_rak_arm`（姊妹仓，VANexus 下） 目前**逐字节同构**：`.ioc` 只差工程名两行，生成的 `.bin` SHA-256 完全相同。机械臂那份不是"另一块板的配置"，只是复制品。
+⚠️ 本工程与 `vehical_rak_edge_ai`（姊妹仓，VANexus 下）同属 C30D 板但角色不同：本仓跑**底盘 + 机械臂运动控制**（CAN 主链路），edge_ai 仓跑**边缘 BNN/SNN 推理**（CAN + SPI 屏 + 单路电机/编码器）。两仓共享板级/协议文档，但 `.ioc` 与外设集不同。
 
 ---
 

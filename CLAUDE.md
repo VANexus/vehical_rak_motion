@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 5. [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md) — **进行中的架构变更**（见下）
 6. [`docs/CUBEMX-SOP.md`](docs/CUBEMX-SOP.md) — **改任何外设/配置前必读**：外设配置一律走 CubeMX（含无头命令参考、生成后必查清单、反模式）
 
-姊妹仓 `vehical_rak_arm` 是同一块板的机械臂角色；上位机是 `VANexus/rak`（Jetson）。
+姊妹仓 `vehical_rak_edge_ai` 是同一块板的边缘 AI 角色（跑 BNN/SNN）；上位机是 `VANexus/rak`（Jetson）。
 
 ## 常用命令
 
@@ -22,7 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cmake --preset Debug   && cmake --build --preset Debug
 cmake --preset Release && cmake --build --preset Release
 STM32_Programmer_CLI -c port=SWD mode=UR freq=100 \
-    -w build/Debug/vehical_rak_chassis.hex -v -rst
+    -w build/Debug/vehical_rak_motion.hex -v -rst
 
 python3 tools/can_check.py            # 协议门禁：结构校验 + 向量比对 + CRC 负例，退出码 0 才算过
 python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段

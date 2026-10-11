@@ -7,7 +7,7 @@
 #
 # 作用：把 STM32CubeCLT 的编译器 / cmake / ninja / 烧录工具前置到 PATH，
 # 之后两个工程都用同一套命令：
-#   cd vehical_rak_chassis && cmake --preset Debug && cmake --build --preset Debug
+#   cd vehical_rak_motion && cmake --preset Debug && cmake --build --preset Debug
 #
 # 只修改当前 shell 的 PATH，不写任何系统配置、不安装任何东西。
 # ---------------------------------------------------------------------------

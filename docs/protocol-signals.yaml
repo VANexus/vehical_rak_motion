@@ -23,7 +23,7 @@ bus:
   frame: CAN2.0A-11bit
   nodes:
     jetson:  上位机（rak / Orin Nano，can0 = mttcan，外置 SN65HVD230）
-    chassis: vehical_rak_chassis（C30D F407VET6，CAN1 = PD0 RX / PD1 TX，板载收发器）
+    chassis: vehical_rak_motion（C30D F407VET6，CAN1 = PD0 RX / PD1 TX，板载收发器）
   # v4 起：单节点拓扑（机械臂板已烧毁退役）。USB v2 串口路径保留为备用链路，帧格式不变。
   ground: 两个节点 GND 必须互联（差分总线共模参考）；总线两个物理端点各 120 Ω
 
