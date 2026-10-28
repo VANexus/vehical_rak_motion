@@ -18,6 +18,9 @@ extern "C" {
 #define NODE_INFO_ID 0x030u
 #define NODE_INFO_DATA_ID 0x03u
 #define NODE_INFO_HZ 1u
+#define ARM_NODE_INFO_ID 0x031u
+#define ARM_NODE_INFO_DATA_ID 0x0Du
+#define ARM_NODE_INFO_HZ 1u
 #define DRIVE_CMD_ID 0x100u
 #define DRIVE_CMD_DATA_ID 0x04u
 #define DRIVE_CMD_HZ 100u
@@ -45,6 +48,9 @@ extern "C" {
 #define DIAG_ID 0x220u
 #define DIAG_DATA_ID 0x0Cu
 #define DIAG_HZ 10u
+#define ARM_DIAG_ID 0x221u
+#define ARM_DIAG_DATA_ID 0x0Eu
+#define ARM_DIAG_HZ 10u
 
 static inline uint8_t can_crc8(const uint8_t *d, uint8_t n, uint8_t data_id)
 {

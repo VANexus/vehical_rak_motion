@@ -4,17 +4,17 @@
  * [AI]  协议规范见 docs/PROTOCOL.md（v4）：小端、DLC=8；仅 0x010 SAFETY_CMD 为
  * [AI]  e2e 帧（byte6=counter|flags、byte7=CRC8 poly0x07 初值=Data ID），其余为
  * [AI]  raw8 纯数据帧（完整性由 CAN 硬件 CRC/ACK/重传保证）。
- * [AI]  R45 实现——下行：0x100 DRIVE_CMD(4 轮速 0.01rad/s)、0x110/111 ARM_CMD
- * [AI]  (7 轴 0.1°)、0x010 SAFETY(急停 ISR 快速路径 + START/STOP 远程门)；
- * [AI]  上行：0x200/201 WHEEL_POS(100Hz)、0x202 WHEEL_SPD(100Hz)、
- * [AI]  0x210/211 SERVO_STATE(50Hz)、0x220 DIAG(10Hz)、0x030 NODE_INFO(1Hz)。
+ * [AI]  R45 实现——下行：0x100 DRIVE_CMD(4 轮速 0.01rad/s)、0x010 SAFETY
+ * [AI]  (急停 ISR 快速路径 + START/STOP 远程门)；上行：0x200/201 WHEEL_POS(100Hz)、
+ * [AI]  0x202 WHEEL_SPD(100Hz)、0x220 DIAG(10Hz)、0x030 NODE_INFO(1Hz)。
+ * [AI]  R64（2026-10-28 双板架构）：舵机迁到机械臂板 vehical_rak_arm，
+ * [AI]  本板不再处理 0x110/111 ARM_CMD，也不再发 0x210/211 SERVO_STATE。
  * [AI]  v3 的 XFER 互锁/VEL_FB/NODE_INFO@0x230 全部作废（臂板退役）。
  */
 #include "app_can.h"
 #include "app_car.h"
 #include "app_can_control_policy.h"
 #include "app_serial.h"
-#include "app_servo.h"   /* [AI] R49: SERVO_STATE 遥测读回 servo_get_pulse */
 #include "main.h"
 #include "can.h"
 #include "stm32f4xx.h"
@@ -37,28 +37,17 @@
 #define DID_NODEINFO     0x03U
 #define CID_DRIVE_CMD    0x100U
 #define DID_DRIVE_CMD    0x04U
-#define CID_ARM_CMD_A    0x110U
-#define DID_ARM_A        0x05U
-#define CID_ARM_CMD_B    0x111U
-#define DID_ARM_B        0x06U
 #define CID_WHEEL_POS_A  0x200U
 #define CID_WHEEL_POS_B  0x201U
 #define CID_WHEEL_SPD    0x202U
-#define CID_SERVO_A      0x210U
-#define CID_SERVO_B      0x211U
 #define CID_DIAG         0x220U
 #define PROTO_VER        4U
 #define HW_REV           1U
 
 /* [AI] v4 量化常数（协议单点定义在 YAML，换算处集中在此）
    DRIVE_CMD: int16 × 0.01 rad/s → 内部 urad/s：×10^4
-   ARM_CMD:   uint16 × 0.1°   → 内部 urad  ：0.1° = 1745.33 urad → raw×1745333/1000
    WHEEL_SPD: 内部 urad/s → 0.01 rad/s：÷10^4 */
 #define DRIVE_URAD_PER_LSB   10000L
-#define ARM_URAD_NUM     1745333L   /* [AI] R62: R49 起因子少 10 倍（174.533）——
-                                       命令角缩至 1/10，生产路径 e2e 实测暴露
-                                       （命令 Home 225° 实动 22.4°）；协议/遥测侧无误 */
-#define ARM_URAD_DEN        1000L
 #define SPD_URAD_PER_LSB   10000L
 
 /* [AI] v4 deadman：DRIVE/ARM 指令流 100 ms 断流（docs/PROTOCOL.md §6.2） */
@@ -76,7 +65,6 @@ static QueueHandle_t rx_queue;
 static volatile uint8_t can_remote;
 static volatile uint8_t can_clear_req;    /* [AI] R50: CAN CLEAR_ESTOP 请求（ISR 置位，任务落地） */
 static volatile uint32_t last_drive_ms;   /* [AI] 最近 DRIVE_CMD 到达 tick */
-static volatile uint32_t last_arm_ms;     /* [AI] 最近 ARM_CMD 到达 tick */
 static volatile uint8_t drive_stale;      /* [AI] 已执行过断流清零（边沿触发） */
 
 uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init)
@@ -226,7 +214,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
             }
             continue;
         }
-        if (f.id == CID_DRIVE_CMD || f.id == CID_ARM_CMD_A || f.id == CID_ARM_CMD_B) {
+        /* [AI] R64: ARM_CMD(0x110/111) 归机械臂板，本板不消费 */
+        if (f.id == CID_DRIVE_CMD) {
             (void)xQueueSendFromISR(rx_queue, &f, &woken);
         }
         /* [AI] 其余 ID（遥测/管理/未知）本节点不消费，静默丢弃 */
@@ -255,34 +244,6 @@ void can_rx_task_step(void)
         return;
     }
 
-    if (f.id == CID_ARM_CMD_A || f.id == CID_ARM_CMD_B) {
-        /* [AI] 轴序单点定义见 app_car.h：axis[0..6]=J1..J6+夹爪。
-           A 帧=J1..J4，B 帧=J5,J6,夹爪；凑齐 7 轴整组下发（valid=0x7F）。
-           夹爪无硬件通道（app_car.h），上位机约定其值仅回显不落地。 */
-        static int32_t pending[7];
-        static uint8_t have_a, have_b;
-        int32_t p[7];
-        if (f.id == CID_ARM_CMD_A) {
-            for (unsigned i = 0; i < 4U; ++i) {
-                /* [AI] R63: int64 中间量——R62 的 1745333 因子使 int32 乘法在
-                   raw>1230（>123°）溢出回绕（e2e 实测 270°→23.8°）；结果域 ≤4.72e6 仍在 int32。 */
-                pending[i] = (int32_t)((int64_t)get_le16(&f.data[i * 2U]) *
-                                       ARM_URAD_NUM / ARM_URAD_DEN);
-            }
-            have_a = 1U;
-        } else {
-            for (unsigned i = 0; i < 3U; ++i) {
-                pending[4U + i] = (int32_t)((int64_t)get_le16(&f.data[i * 2U]) *
-                                            ARM_URAD_NUM / ARM_URAD_DEN);
-            }
-            have_b = 1U;
-        }
-        last_arm_ms = now;
-        if (have_a == 0U || have_b == 0U) return;   /* [AI] 首组未齐不下发 */
-        for (unsigned i = 0; i < 7U; ++i) p[i] = pending[i];
-        car_arm_command_urad(p, 0x7FU);
-        return;
-    }
 }
 
 /* [AI] R20 HAL 化：HAL_CAN_AddTxMessage 自动选第一个空邮箱——原"手动分派
@@ -300,7 +261,7 @@ static int can_tx(uint32_t std_id, const uint8_t *d)
 }
 
 /* [AI]  Task_CAN_Tx：1kHz 底拍。串口泵（USB v2 备用链路）+ 遥测调度。
-   相位错开：10ms 轮位/轮速、20+5ms 舵机、50+50ms DIAG、0ms NODE_INFO，
+   相位错开：10ms 轮位/轮速、50+50ms DIAG、0ms NODE_INFO，
    避免同拍挤爆 3 个发送邮箱。 */
 void can_tx_task_step(uint32_t now_ms)
 {
@@ -338,9 +299,8 @@ void can_tx_task_step(uint32_t now_ms)
         }
     }
 
-    /* [AI] DRIVE/ARM 断流（100ms）：远程门开着但指令流断了 → 轮速目标清零
-       （enable=0 松链接）；舵机无目标概念，自然保持当前位置。边沿置位供
-       STATE.bit3 cmd_stale。 */
+    /* [AI] DRIVE 断流（100ms）：远程门开着但指令流断了 → 轮速目标清零
+       （enable=0 松链接）。边沿置位供 STATE.bit3 cmd_stale。 */
     if (can_remote != 0U &&
         (uint32_t)(now_ms - last_drive_ms) > CMD_DEADMAN_MS) {
         int32_t zero[CAR_MOTOR_COUNT] = {0, 0, 0, 0};
@@ -387,24 +347,6 @@ void can_tx_task_step(uint32_t now_ms)
             put_le16(&d[i * 2U], vel_urad_s[i] / SPD_URAD_PER_LSB);
         }
         (void)can_tx(CID_WHEEL_SPD, d);
-    }
-    if (ph % 20U == 5U) {                            /* 50 Hz：舵机实际角 */
-        /* [AI] 通道→轴映射与 car_arm_command_urad 相反：ch0..ch5=J6..J1。
-           脉宽→0.1°：(us-500)×270/2000=(us-500)×27/20。
-           A 帧=J1..J4（8 字节整），B 帧=J5,J6,夹爪；夹爪无通道恒发 0。 */
-        static const unsigned ch_of_axis[6] = { 5U, 4U, 3U, 2U, 1U, 0U };
-        for (unsigned i = 0; i < 4U; ++i) {
-            unsigned us = servo_get_pulse(ch_of_axis[i]);
-            put_le16(&d[i * 2U], (int32_t)(((uint32_t)(us - 500U) * 27U) / 20U));
-        }
-        (void)can_tx(CID_SERVO_A, d);
-        for (unsigned i = 0; i < 2U; ++i) {
-            unsigned us = servo_get_pulse(ch_of_axis[4U + i]);
-            put_le16(&d[i * 2U], (int32_t)(((uint32_t)(us - 500U) * 27U) / 20U));
-        }
-        put_le16(&d[4], 0);                          /* 夹爪：无硬件通道 */
-        put_le16(&d[6], 0);                          /* RSVD16 */
-        (void)can_tx(CID_SERVO_B, d);
     }
     /* [AI] 相位错开原则：ph%10==0 的轮位爆发(3帧)占满 3 邮箱，DIAG/NODE_INFO
        必须落在 %10!=0 且避开 %20==5(舵机×2) 的相位，否则作为第 4 帧必然被丢。 */

@@ -55,7 +55,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_protocol_v2.c
     Core/Src/app_imu.c
     Core/Src/app_oled.c
-    Core/Src/app_servo.c
 )
 
 # Add include paths

@@ -272,11 +272,7 @@ void serial_v2_tick(uint32_t now_ms)
         car_wheel_command_urad(snapshot.wheel_target_urad_s,
                                snapshot.drive_armed, now_ms);
     }
-    /* [AI] R42: ARM 命令落地舵机。arm_armed 由会话层 lease/estop/inhibit 把关，
-       disarm 或 lease 过期时 snapshot.arm_armed=0，这里不再刷脉宽——
-       舵机保持最后一帧位置（50Hz PWM 由硬件自续，安全位置由上位机负责下发）。 */
-    if (snapshot.handshake_complete && snapshot.arm_armed != 0U) {
-        car_arm_command_urad(snapshot.arm_command_position_urad,
-                             snapshot.arm_command_valid_mask);
-    }
+    /* [AI] R64（2026-10-28 双板架构）：舵机已迁到机械臂板 vehical_rak_arm。
+       底盘板不再落地 ARM 命令——USB v2 会话仍按原协议解析 ARM（帧格式不变），
+       但本板没有舵机可驱。臂指令的实际通路 = CAN 0x110/111 → 机械臂板。 */
 }

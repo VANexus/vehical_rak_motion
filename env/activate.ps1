@@ -56,7 +56,3 @@ Write-Host "[env] cmake   = $((Get-Command cmake.exe -ErrorAction SilentlyContin
 Write-Host "[env] ninja   = $((Get-Command ninja.exe -ErrorAction SilentlyContinue).Source)"
 Write-Host "[env] flash   = $((Get-Command STM32_Programmer_CLI.exe -ErrorAction SilentlyContinue).Source)"
 
-# 台架归档区（car2/）的旧裸机脚本用的是自带的 12.2.1 工具链和 PowerShell 脚本，
-# 与上面的 CubeCLT 无关；只有在跑 car2 里的 build.ps1 时才需要额外加载。
-#   . ..\car2\tools\activate.ps1
-Write-Host '[env] 提示：编译 car2/ 下的裸机实验请改用 car2/tools/activate.ps1。' -ForegroundColor DarkGray

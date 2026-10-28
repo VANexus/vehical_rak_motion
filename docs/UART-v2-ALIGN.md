@@ -1,5 +1,9 @@
 # Jetson-F407 UART v2 alignment
 
+> ⚠️ **历史备用链路（2026-10-28）**：本文的 USB v2 是**单板时期**的备用链路。
+> 当前 **CAN v4 是唯一主链路**，机械臂板已恢复（`vehical_rak_arm`），舵机迁到该板；
+> 本文的端点契约仍作为 USB 备用路径的参考，但**不是当前主链路**。
+
 Status: wire contract fixed in the Jetson repository at
 [`docs/protocol/usb_serial_v2.md`](https://github.com/VANexus/rak/blob/main/docs/protocol/usb_serial_v2.md).
 This file records the

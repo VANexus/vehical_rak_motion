@@ -2,10 +2,18 @@
 # 规范性文字见 protocol.md；本文件是两端（STM32 C / Jetson C++）+ CI 共同的编码依据。
 # 校验与测试向量生成：python3 tools/can_check.py
 #
-# *** FROZEN（2026-10-09 用户拍板）***
+# *** FROZEN（2026-10-09 用户拍板；2026-10-28 按「双板架构恢复」修订一次）***
 # 自本版起协议内容冻结：此后只做上位机侧功能开发，不再改帧/信号/ID/量化。
 # 确需修订必须走提案流程：先改本 YAML → 两端同步实现 → tools/can_check.py 通过
 # → PROTOCOL.md 同步 → 两 MCU 仓同批提交，缺一不可。
+#
+# 2026-10-28 修订（架构恢复双板：底盘板 + 机械臂板）：
+#   1) ARM_CMD_A/B 与 SERVO_STATE_A/B 的**处理板**由底盘板改为机械臂板；
+#      帧 ID 与字节布局一字未动（同总线 ID 全局唯一 → Jetson 侧零改动）。
+#   2) 机械臂板新增两帧自己的上行：0x031 ARM_NODE_INFO、0x221 ARM_DIAG
+#      （否则与底盘板的 0x030 / 0x220 同 ID 撞车）。
+#   3) 协议版本号仍是 4（NODE_INFO.PROTO 不变）——为了不让 Jetson 侧握手判据失效。
+#      新增帧属**加法**，不破坏既有帧，Jetson 侧可以先不订阅。
 #
 # 约定：
 #   byte_order: little        -> Intel/小端（低字节在低地址）
@@ -24,8 +32,11 @@ bus:
   nodes:
     jetson:  上位机（rak / Orin Nano，can0 = mttcan，外置 SN65HVD230）
     chassis: vehical_rak_motion（C30D F407VET6，CAN1 = PD0 RX / PD1 TX，板载收发器）
-  # v4 起：单节点拓扑（机械臂板已烧毁退役）。USB v2 串口路径保留为备用链路，帧格式不变。
-  ground: 两个节点 GND 必须互联（差分总线共模参考）；总线两个物理端点各 120 Ω
+    arm:     vehical_rak_arm（C30D F407VET6，同一块板，CAN1 = PD0 RX / PD1 TX，板载收发器）
+  # 2026-10-28 起：三节点拓扑（Jetson / 底盘板 / 机械臂板），两板同挂一条 CAN 总线。
+  # 架构：底盘板 = 4 轮闭环 + IMU；机械臂板 = 6 路舵机。
+  # USB v2 串口路径保留为底盘板备用链路，帧格式不变。
+  ground: 三个节点 GND 必须互联（差分总线共模参考）；总线两个物理端点各 120 Ω
 
 units:
   rad_s:  {factor: 0.01, unit: rad/s}
@@ -93,6 +104,14 @@ messages:
     layout: raw8
     signals: [PROTO_u8, HWREV_u8, BUILD_u16, FAULT_u16, STATE_u16]
 
+  - id: 0x031
+    name: ARM_NODE_INFO
+    data_id: 0x0D
+    cycle_hz: 1            # 上电 1 次 + 1 Hz
+    dir: arm->broadcast
+    layout: raw8
+    signals: [PROTO_u8, HWREV_u8, BUILD_u16, FAULT_u16, STATE_u16]
+
   # ---- 指令（jetson -> chassis）----
   - id: 0x100
     name: DRIVE_CMD
@@ -106,7 +125,7 @@ messages:
     name: ARM_CMD_A
     data_id: 0x05
     cycle_hz: 50
-    dir: jetson->chassis
+    dir: jetson->arm
     layout: raw8
     signals: [J1ANG_u16, J2ANG_u16, J3ANG_u16, J4ANG_u16]
 
@@ -114,7 +133,7 @@ messages:
     name: ARM_CMD_B
     data_id: 0x06
     cycle_hz: 50
-    dir: jetson->chassis
+    dir: jetson->arm
     layout: raw8
     signals: [J5ANG_u16, J6ANG_u16, GRIP_u16, RSVD16]
 
@@ -147,7 +166,7 @@ messages:
     name: SERVO_STATE_A
     data_id: 0x0A
     cycle_hz: 50
-    dir: chassis->jetson
+    dir: arm->jetson
     layout: raw8
     signals: [J1ANG_u16, J2ANG_u16, J3ANG_u16, J4ANG_u16]
 
@@ -155,7 +174,7 @@ messages:
     name: SERVO_STATE_B
     data_id: 0x0B
     cycle_hz: 50
-    dir: chassis->jetson
+    dir: arm->jetson
     layout: raw8
     signals: [J5ANG_u16, J6ANG_u16, GRIP_u16, RSVD16]
 
@@ -166,6 +185,14 @@ messages:
     dir: chassis->jetson
     layout: raw8
     signals: [BAT_u16, FAULT_u16, STATE_u16, MODE_u8, BUSOFFCNT_u8]
+
+  - id: 0x221
+    name: ARM_DIAG
+    data_id: 0x0E
+    cycle_hz: 10
+    dir: arm->jetson
+    layout: raw8
+    signals: [FAULT_u16, STATE_u16, MODE_u8, SERVO_ERRCNT_u8, RSVD16]
 
 # 信号字典：bit 长度 / 有无符号 / factor / min / max
 signals:
@@ -190,6 +217,7 @@ signals:
   STATE_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 状态位图（state_bits）}
   MODE_u8:   {len: 8,  signed: false, factor: 1,    min: 0, max: 3,     desc: 模式机（mode_enum）}
   BUSOFFCNT_u8: {len: 8, signed: false, factor: 1, min: 0, max: 255,  desc: bus-off 累计计数（饱和 255）}
+  SERVO_ERRCNT_u8: {len: 8, signed: false, factor: 1, min: 0, max: 255, desc: 机械臂板：舵机指令异常计数（饱和 255）}
   PROTO_u8:  {len: 8,  signed: false, factor: 1,    min: 0, max: 255,  desc: 协议版本，本文档 = 4}
   HWREV_u8:  {len: 8,  signed: false, factor: 1,    min: 0, max: 255,  desc: 硬件版本}
   BUILD_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 固件构建标识（git short hash 折 16 位）}
@@ -211,3 +239,5 @@ vectors:
   - {msg: SERVO_STATE_A, name: VA, values: {J1ANG_u16: 0, J2ANG_u16: 2250, J3ANG_u16: 2700, J4ANG_u16: 0}}
   - {msg: SERVO_STATE_B, name: VB, values: {J5ANG_u16: 0, J6ANG_u16: 0, GRIP_u16: 900}}
   - {msg: DIAG,          name: VC, values: {BAT_u16: 11100, FAULT_u16: 0, STATE_u16: 0x0003, MODE_u8: 1, BUSOFFCNT_u8: 0}}
+  - {msg: ARM_NODE_INFO, name: VD, values: {PROTO_u8: 4, HWREV_u8: 1, BUILD_u16: 0x1234, FAULT_u16: 0, STATE_u16: 0x0000}}
+  - {msg: ARM_DIAG,      name: VE, values: {FAULT_u16: 0, STATE_u16: 0x0003, MODE_u8: 1, SERVO_ERRCNT_u8: 0, RSVD16: 0}}

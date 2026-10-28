@@ -178,6 +178,10 @@ exit
 | 参数值当数字填 | `IP (CAN1) : Parameter (BS1) has invalid value (16)` | `.ioc` 里**枚举型参数存的是字符串**：`CAN_BS1_16TQ` 而不是 `16`。用 `get mode_param_possvalue` 查合法值 |
 | 手改 `Mcu.IP*` / `Mcu.Pin*` 块 | CubeMX 拒绝新增的 IP；更糟的是把 `TIM6`/`NVIC` 弄成 `not ready`，之后生成全挂 | **永远不手改这两个块**，用 `set mode` / `set pin` 让 CubeMX 自己维护 |
 | 不设超时 | 无头模式下若 CubeMX 想弹对话框，会永久阻塞 | **一定加 `timeout`** |
+| **GPIO 参数用 `set ip parameters` 设** | 返回 `OK` 但 `.ioc` 纹丝不动（实测：`set ip parameters USART2 BaudRate 115200` 也是假 OK，值是碰巧的默认值才对） | **GPIO 引脚参数走 `set gpio parameters <引脚> <参数名> <值>`**。这条不在 `help` 的命令表里，是从 `set gpio` 的 usage 提示里挖出来的。例：`set gpio parameters PE0 GPIO_PuPd GPIO_PULLUP` |
+| 只设 `set pin <脚> GPXTI0` | CubeMX 给默认值 `GPIO_MODE_IT_RISING` + `NOPULL` —— 低有效按键配成上升沿、还浮空 | 信号与参数**分开设**：先 `set pin PE0 GPXTI0`，再 `set gpio parameters PE0 GPIO_PuPd GPIO_PULLUP` 和 `... GPIO_ModeDefaultEXTI GPIO_MODE_IT_RISING_FALLING` |
+| NVIC 用脚本使能 | `set ip parameters NVIC EXTI0_IRQn true` 返回 `OK` 但不生效，`.ioc` 里没有条目、`stm32f4xx_it.c` 里也没有 handler | **NVIC 使能只能 GUI 勾**（`System Core → NVIC`）。脚本设不了 |
+| **只看 `cmake --build` 退出码就以为接好了** | 工程开了 `-Wl,--gc-sections`：新写的模块**没有调用者**时整条链被回收，构建照样零警告零错误通过，但符号根本不在 `.elf` 里 —— 上板什么都不发生 | **生成后必须查符号**：`arm-none-eabi-nm build/Debug/*.elf \| grep <你的前缀>`。空 = 被 gc 了，说明还没接进任何任务 |
 
 ### 日志怎么看
 

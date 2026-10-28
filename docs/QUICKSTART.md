@@ -6,10 +6,14 @@
 
 ## 0. 这个仓库是什么
 
-`vehical_rak_motion` = 麦轮**底盘**的 STM32F407VET6 固件（轮趣 C30D 一体板）。
-同硬件的姊妹仓是 `vehical_rak_edge_ai`（边缘 AI，跑 BNN/SNN），上位机是 `rak`（Jetson/ROS 2）。三者靠 **CAN 2.0A @1 Mbps** 协作，协议见 [`docs/PROTOCOL.md`](PROTOCOL.md)。
+`vehical_rak_motion` = 轮趣 C30D（STM32F407VET6）上的 **四轮麦轮底盘**固件：
+4 路 AT8236 + 4 路正交编码器 + IMU + OLED，四轮 **25 kHz 硬实时速度闭环**。
+同硬件的姊妹仓 `vehical_rak_edge_ai`（git 仓名历史遗留）= **机械臂板 `vehical_rak_arm`**（6 路舵机）；
+上位机是 `rak`（Jetson / ROS 2）。三者靠 **CAN 2.0A @1 Mbps** 协作，协议见 [`docs/PROTOCOL.md`](PROTOCOL.md)。
 
-**当前进度**：CubeMX 骨架能编译（Debug/Release 双预设，0 警告），**应用代码 0 行**，外设一个都没配。别期待板上已有闭环行为。
+**当前进度**：**R64**（恢复双板架构，本板收敛为 pure 底盘：4 轮闭环 + IMU + CAN v4 主链路 + OLED + IWDG）；
+Debug/Release 双预设零警告。⚠️ 已知问题：左前轮零指令自转，见
+[`docs/KNOWN-ISSUE-runaway-wheel.md`](KNOWN-ISSUE-runaway-wheel.md)（issue rak#8）。
 
 ## 1. 装工具链（一次性）
 
@@ -54,7 +58,7 @@ STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_mot
 ```
 
 - Linux：ST-LINK 的 udev 规则已在 `/etc/udev/rules.d/49-stlinkv2*.rules`，用户在 `dialout` 组，插上即用。
-- Windows：需装 STSW-LINK009 驱动（`car2/tools/stsw-link009`）。
+- Windows：ST-LINK 驱动随 STM32CubeCLT / STM32CubeProgrammer 安装包提供（`C:\ST\STM32CubeCLT_1.22.0\STM32CubeProgrammer\Drivers`）；本机已装好并实测可用（WinUSB 绑定，`USB\VID_0483&PID_3748`）。
 - **烧完必须真断电冷启动**（见下一节），否则你测的还是旧固件。
 
 ## 5. 首次上板自检清单（按顺序做）

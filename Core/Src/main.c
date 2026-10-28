@@ -32,7 +32,6 @@
 #include "app_car.h"
 #include "app_can.h"
 #include "app_serial.h"
-#include "app_servo.h"   /* [AI] 6 路舵机驱动 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -118,7 +117,6 @@ int main(void)
   car_init();      /* [AI]  R20: 复位原因 + 电机 PWM/编码器启动(IMU 探测;外设初始化已由 MX 完成) */
   can_init();      /* [AI]  R20: CAN 过滤器/启动/通知 + 接收队列 */
   serial_init();   /* [AI]  R20: Type-C 串口遥控(武装 RX 循环 DMA) */
-  servo_init();    /* [AI]  6 路舵机 TIM8(PC6-9) + TIM12(PB14/15) @50Hz */
   /* USER CODE END 2 */
 
   /* Init scheduler */

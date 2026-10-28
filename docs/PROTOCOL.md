@@ -1,6 +1,6 @@
 # CAN 通信协议 v4（两端对接规范，规范性文档）
 
-适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘 F407（`vehical_rak_motion`）。
+适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘板 F407（`vehical_rak_motion`）↔ 机械臂板 F407（`vehical_rak_arm`）。
 **这是两端的通信事实来源**：MCU 侧编解码、Jetson 侧编解码、以及本文的测试向量三者必须逐字节一致。任何一方改协议，必须先改 [`protocol-signals.yaml`](protocol-signals.yaml) 并重跑 `tools/can_check.py`。
 
 > **★ 协议已冻结（FROZEN，2026-10-09 用户拍板）★**
@@ -11,8 +11,9 @@
 
 > **v4 相对 v3 的定位变化（2026-10-09 已定，不再开洞）**
 > 1. **CAN 是唯一主链路**：所有控制与遥测（安全门、4 轮速指令、7 轴舵机、全量遥测）全部走 CAN；**USB v2 串口降级为备用链路**，帧格式冻结不变（见 §10）。
-> 2. **单节点拓扑**：机械臂板已烧毁退役，v3 的底盘↔机械臂互锁层（`XFER_*`）整体作废。
-> 3. **控制契约沿用 ros2-control 架构**：4 轮速 + 7 轴（6 关节 + 1 夹爪）位置，麦轮 IK 在 Jetson 侧（见 `vehical_rak_motion/docs/ROS2-CONTROL-ARCH.md`）。
+> 2. **双板拓扑（2026-10-28 恢复）**：机械臂板重新启用，架构回到「底盘板（4 轮闭环 + IMU）」+「机械臂板（6 路舵机）」，两板同挂一条 CAN 总线。v3 的底盘↔机械臂互锁层（`XFER_*`）仍未启用。
+> 3. **ARM 帧归属变更（2026-10-28）**：`ARM_CMD_A/B`、`SERVO_STATE_A/B` **帧 ID 与字节布局一字未动**，只是**处理板**从底盘板改为机械臂板 —— 同一条总线上 ID 全局唯一 → Jetson 侧零改动。机械臂板新增自己的两帧上行 `0x031 ARM_NODE_INFO` / `0x221 ARM_DIAG`，避免与底盘板的 `0x030` / `0x220` 同 ID 撞车。协议版本号仍是 4（`NODE_INFO.PROTO` 不变），新帧属加法，Jetson 侧可先不订阅。
+> 4. **控制契约沿用 ros2-control 架构**：4 轮速 + 7 轴（6 关节 + 1 夹爪）位置，麦轮 IK 在 Jetson 侧（见 `vehical_rak_motion/docs/ROS2-CONTROL-ARCH.md`）。
 
 术语：**必须**=强制；**应**=强烈建议，偏离需写明理由；**可**=可选。
 
@@ -21,9 +22,9 @@
 ## 1. 物理层与拓扑
 
 - 单总线，**CAN 2.0A（11 bit ID）**，**1 Mbps**，经典帧 DLC=8。**禁用 CAN FD**（F407 bxCAN 不支持；Jetson mttcan 支持但必须保持关闭，`ip link` 不得带 `fd` 参数）。
-- 两个节点，**总线两个物理端点各 120 Ω**（Waveshare SN65HVD230 模块板载一颗，确认焊点闭合；底盘板端应补一颗）。
-- **两个节点 GND 必须互联**（第三根线）：差分接收器的共模参考。缺地时表现为"偶发收得到、大量 bus-off"的临界总线——2026-10-09 联调实测。
-- 底盘侧：板载收发器，**PD0=CAN1_RX、PD1=CAN1_TX**（`docs/board-c30d.md` §2）。1 Mbps 位时序 = PCLK1 42 MHz / BRP2 / 21 tq（BS1=16, BS2=4）= 精确 1.000 Mbps，采样点 81.0 %。**时钟必须来自 HSE 8 MHz**（用 HSI 会出现偶发 bus-off 玄学故障）。
+- 三个节点（Jetson + 底盘板 + 机械臂板），**总线两个物理端点各 120 Ω**（Waveshare SN65HVD230 模块板载一颗，确认焊点闭合；底盘板端应补一颗）。
+- **三个节点 GND 必须互联**（第三根线）：差分接收器的共模参考。缺地时表现为"偶发收得到、大量 bus-off"的临界总线——2026-10-09 联调实测。
+- 两块 MCU 板侧：板载收发器，**PD0=CAN1_RX、PD1=CAN1_TX**（`docs/board-c30d.md` §2）—— 底盘板与机械臂板并联到同一对 CANH/CANL。1 Mbps 位时序 = PCLK1 42 MHz / BRP2 / 21 tq（BS1=16, BS2=4）= 精确 1.000 Mbps，采样点 81.0 %。**时钟必须来自 HSE 8 MHz**（用 HSI 会出现偶发 bus-off 玄学故障）。
 - Jetson 侧：mttcan（`c310000.mttcan`，50 MHz 时钟）+ 外置 **SN65HVD230**（3.3 V 器件，可直连 Orin）。
   实配：`ip link set can0 type can bitrate 1000000 sample-point 0.800 restart-ms 100`（`can0-up.service` 持久化）。
   ⚠️ **采样点勘误（实测）**：mttcan @50 MHz 在 1 Mbps 下每 bit 恰 50 tq，采样点粒度 2 %——规范曾写 0.810，但驱动就近取整后**实际生效 0.800**。与底盘 81.0 % 差 1.0 pp，在 CAN 容限内，整场联调（97 万+ 帧）零错误帧。排查位时序问题时以 `ip -details link show can0` 实际读数为准。
@@ -69,23 +70,25 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `0x010` | `SAFETY_CMD` | Jetson→广播 | 事件 | 0x01 | e2e |
 | `0x020` | `EMCY` | 底盘→广播 | 事件（10 ms 内首发，重发 3 次） | 0x02 | raw8 |
 | `0x030` | `NODE_INFO` | 底盘→广播 | 上电 1 次 + 1 Hz | 0x03 | raw8 |
+| `0x031` | `ARM_NODE_INFO` | 机械臂板→广播 | 上电 1 次 + 1 Hz | 0x0D | raw8 |
 | `0x100` | `DRIVE_CMD` | Jetson→底盘 | 100 Hz | 0x04 | raw8 |
-| `0x110` | `ARM_CMD_A` (J1-J4) | Jetson→底盘 | 50 Hz | 0x05 | raw8 |
-| `0x111` | `ARM_CMD_B` (J5,J6,夹爪) | Jetson→底盘 | 50 Hz | 0x06 | raw8 |
+| `0x110` | `ARM_CMD_A` (J1-J4) | Jetson→**机械臂板** | 50 Hz | 0x05 | raw8 |
+| `0x111` | `ARM_CMD_B` (J5,J6,夹爪) | Jetson→**机械臂板** | 50 Hz | 0x06 | raw8 |
 | `0x200` | `WHEEL_POS_A` (W1,W2) | 底盘→Jetson | 100 Hz | 0x07 | raw8 |
 | `0x201` | `WHEEL_POS_B` (W3,W4) | 底盘→Jetson | 100 Hz | 0x08 | raw8 |
 | `0x202` | `WHEEL_SPD` (W1-W4) | 底盘→Jetson | 100 Hz | 0x09 | raw8 |
-| `0x210` | `SERVO_STATE_A` (J1-J4) | 底盘→Jetson | 50 Hz | 0x0A | raw8 |
-| `0x211` | `SERVO_STATE_B` (J5,J6,夹爪) | 底盘→Jetson | 50 Hz | 0x0B | raw8 |
+| `0x210` | `SERVO_STATE_A` (J1-J4) | **机械臂板**→Jetson | 50 Hz | 0x0A | raw8 |
+| `0x211` | `SERVO_STATE_B` (J5,J6,夹爪) | **机械臂板**→Jetson | 50 Hz | 0x0B | raw8 |
 | `0x220` | `DIAG` | 底盘→Jetson | 10 Hz | 0x0C | raw8 |
+| `0x221` | `ARM_DIAG` | **机械臂板**→Jetson | 10 Hz | 0x0E | raw8 |
 
 ### 带宽核算（1 Mbps，经典帧含填充约 110–130 µs/帧）
 
 | 方向 | 帧率 | 来源 |
 | --- | --- | --- |
 | 下行 | 100 + 2×50 = 200 fps | DRIVE 100Hz + ARM 2×50Hz |
-| 上行 | 3×100 + 2×50 + 10 + 1 = 361 fps | 轮位×2 + 轮速 + 舵机×2 + DIAG + NODE_INFO |
-| 合计 | **~561 fps ≈ 总线负载 7 %** | 死区余量 >10 倍，未来扩展（IMU、电流估计）有空间 |
+| 上行 | 3×100 + 2×50 + 10 + 1 + 10 + 1 = 372 fps | 轮位×2 + 轮速 + 舵机×2 + DIAG + NODE_INFO + ARM_DIAG + ARM_NODE_INFO |
+| 合计 | **~572 fps ≈ 总线负载 7 %** | 死区余量 >10 倍，未来扩展（IMU、电流估计）有空间 |
 
 ## 4. 帧信号表
 
@@ -101,6 +104,8 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `0x211 SERVO_STATE_B` | `J5ANG` | `J6ANG` | `GRIP` | 保留=0 |
 | `0x220 DIAG` | `BAT_MV` | `FAULT` | `STATE` | `MODE` u8 + `BUSOFF_CNT` u8 |
 | `0x030 NODE_INFO` | `PROTO` u8 + `HWREV` u8 | `BUILD` u16 | `FAULT` | `STATE` |
+| `0x031 ARM_NODE_INFO` | `PROTO` u8 + `HWREV` u8 | `BUILD` u16 | `FAULT` | `STATE` |
+| `0x221 ARM_DIAG` | `FAULT` | `STATE` | `MODE` u8 + `SERVO_ERRCNT` u8 | 保留=0 |
 | `0x020 EMCY` | `FAULT` | `AUX` | `STATE` | 保留=0 |
 | `0x010 SAFETY_CMD` | `CMD` u16（低 4 位有效） | 保留=0 | 保留=0 | counter/flags=0 + CRC |
 
@@ -116,6 +121,7 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `STATE` | 16 uint16 | — | 位图 | — | `bit0 estop_latched`、`bit1 remote_running`、`bit2 fault_active`、`bit3 cmd_stale`、`bit4 bat_uv`、`bit5 can_recovering`、**`bit6-10 驱动门自诊断`**（`bit6 dg_remote` 远程门、`bit7 dg_cal` 轮标定有效、`bit8 dg_imu` IMU 样本新鲜、`bit9 dg_snapshot` 编码器快照 4/4 新鲜、`bit10 dg_stab` 稳定补偿+换算完成——最近一次轮速命令入口的放行链快照）、bit11-15 保留 |
 | `MODE` | 8 uint8 | — | mode 枚举 | — | 0 IDLE / 1 REMOTE / 2 ESTOP / 3 FAULT |
 | `BUSOFF_CNT` | 8 uint8 | 1 | 0…255（饱和） | — | bus-off 累计计数，健康度指标 |
+| `SERVO_ERRCNT` | 8 uint8 | 1 | 0…255（饱和） | — | 机械臂板：舵机指令异常计数（饱和 255），健康度指标 |
 | `PROTO`/`HWREV`/`BUILD` | 8/8/16 | — | — | — | 协议版本（本文=4）/ 硬件版本 / git short hash 折 16 位 |
 
 轮序 `W1..W4` 与编码器通道 `TIM2/3/4/5` 一一对应（`app_car.c` 单点定义）；关节序 `J1..J6` 对应舵机通道 `ch0..ch5`（固件轴序 J1..J6+夹爪 → ch5..ch0，`app_car.h` 单点定义）。
@@ -144,10 +150,16 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | 监视方 | 被监视 | 时限 | 超时动作 |
 | --- | --- | --- | --- |
 | 底盘 | `DRIVE_CMD` 流 | **100 ms** | 轮速目标清零，受控减速停 → IDLE，`STATE.bit3 cmd_stale=1` |
-| 底盘 | `ARM_CMD_A/B` 流 | **100 ms** | **舵机保持当前位置**（不回 Home、不断使能） |
+| 机械臂板 | `ARM_CMD_A/B` 流 | **100 ms** | **舵机保持当前位置**（不回 Home、不断使能） |
 | Jetson | `DIAG`/`NODE_INFO` 流 | **200 ms** | 判节点失联：冻结 ros2_control 输出、发 `STOP`、UI 报警 |
 
-上电行为（强制）：**IDLE、电机不驱动、舵机直接输出 Home 安全位**（R44 语义：500/2166/2500/500/500/500 µs = 指令 0/225/270/0/0/0°），发一帧 `NODE_INFO`。电机启动只有显式 `START` + `DRIVE_CMD` 路径。
+上电行为（强制）：**IDLE、电机不驱动、舵机直接输出 Home 安全位**（R44 语义：500/2166/2500/500/500/500 µs = 指令 0/225/270/0/0/0°；2026-10-28 起由**机械臂板**执行），各自发一帧 `NODE_INFO` / `ARM_NODE_INFO`。电机启动只有显式 `START` + `DRIVE_CMD` 路径。
+
+**机械臂板的安全语义（2026-10-28 新增）**：臂板是独立 MCU，必须有本地安全兜底——
+- 收到 `0x010 SAFETY_CMD` 的 `EMERGENCY_STOP`（cmd=4）→ 立即**停止落地新的 ARM 指令**（舵机保持当前位置），并置 `STATE.bit0 estop_latched=1`。
+- 急停锁存期间收到的 `ARM_CMD_A/B` **一律不落地**（只更新遥测计数）。
+- `CLEAR_ESTOP`（cmd=5）→ 清锁存（臂板无本地按钮，清除权在 Jetson）。
+- 与底盘板不同：**臂板不再「舵机不受门控」**（旧契约见 §10 备注 7，那是单板时代的分工）。
 
 ### 6.3 模式机
 
@@ -238,7 +250,7 @@ python3 tools/can_check.py --c-header # 生成两端共用的 docs/gen/can_proto
 | 4 | 指令频率：DRIVE 100 Hz、ARM 50 Hz；遥测 100/50/10 Hz——总线负载 ~7 % |
 | 5 | 电池欠压 10500 mV 沿用为硬约束（安全层拒绝 ARMED 轮命令） |
 | 6 | **协议内容冻结（FROZEN）**：驱动门自诊断位图（STATE bit6-10）为最后一项内容修订；急停置位/清除全权走 CAN（按钮 PE0 硬件故障禁用，语义见 §6.1） |
-| 7 | **舵机命令不受固件远程门/急停门控**（`car_arm_command_urad` 直接落地）——ARM 指令的许可与发送时机**由 Jetson 侧负责**（`CanSession` 仅在 `motion_enabled` 且有新目标时发送）；这是两端的分工契约，不是疏漏 |
+| 7 | ~~舵机命令不受固件远程门/急停门控~~（单板时代契约，2026-10-28 作废）——舵机迁到独立机械臂板后，臂板自己锁存急停并拒绝落地指令（见 §6.2）；Jetson 侧仍负责「何时该动」的许可 |
 
 ### 10.2 固件侧（R45→R61，✅ 已完成）
 

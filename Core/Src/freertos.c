@@ -28,7 +28,6 @@
 #include "app_car.h"
 #include "app_can.h"
 #include "app_oled.h"
-#include "app_servo.h"   /* [AI] 舵机自检 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

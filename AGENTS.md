@@ -1,6 +1,9 @@
 # AGENTS.md — 本仓工作约束（底盘 MCU 固件）
 
-C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘 + 机械臂运动控制固件。姊妹仓 `vehical_rak_edge_ai` 是**同一块板子**的边缘 AI 角色（跑 BNN/SNN），上位机是 `VANexus/rak`（Jetson）。
+C30D（STM32F407VET6 + 板载 AT8236）**四轮麦轮底盘**固件。姊妹仓 `vehical_rak_edge_ai`
+（git 仓名历史遗留）是**同一块板子**的**机械臂板 `vehical_rak_arm`** 角色（6 路舵机），
+上位机是 `VANexus/rak`（Jetson）。**2026-10-28 恢复双板架构**：舵机从本板迁出，本板收敛为
+pure 底盘（4 轮闭环 + IMU + CAN）——见 `README.md` §0 与 [`docs/KNOWN-ISSUE-runaway-wheel.md`](docs/KNOWN-ISSUE-runaway-wheel.md)（左前轮自转问题，issue rak#8）。
 
 ## 先读
 
@@ -8,7 +11,7 @@ C30D（STM32F407VET6 + 板载 AT8236）四轮麦轮底盘 + 机械臂运动控�
 - `docs/QUICKSTART.md`：两端（Windows / Linux）从装环境到烧录的完整流程 + 常见坑
 - `docs/BOARD-C30D.md`：**引脚与硬件真相**（板载 CAN 收发器在 PD0/PD1；AT8236 无 STBY；无电流采样）
 - `docs/PROTOCOL.md` + `docs/protocol-signals.yaml`：CAN 协议 **v4（规范 + 机器可读定义，2026-10-09 起内容冻结 FROZEN）**——CAN 是唯一主链路，USB v2 冻结备用；确需修订走 YAML→两端实现→`can_check.py`→两 MCU 仓同批提交的提案流程
-- **进行中，动控制链路前必看**：`docs/ROS2-CONTROL-ARCH.md`（控制契约 = 4 轮速 + 7 轴位置，**麦轮 IK 移到上位机**，CAN v4 主链路已落地）；`docs/UART-v1-ALIGN.md`（lease 实发 200 ms，偏离规范 [10,50]，待团队签字）——别按旧契约继续实现
+- 控制契约：**4 轮速 + 7 轴位置**，麦轮 IK 在**上位机**（`docs/ROS2-CONTROL-ARCH.md`，⚠️ 该文写于"臂板烧毁、只剩 USB"时期，**部分过期**，见文首横幅）；USB v1/v2 对齐文档（`docs/UART-v1-ALIGN.md` / `docs/UART-v2-ALIGN.md`）同属历史备用链路
 
 ## 硬性约束
 

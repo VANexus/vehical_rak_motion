@@ -1,5 +1,8 @@
 # F407 底盘固件侧 UART v1 对齐响应（R16）
 
+> ⚠️ **历史备用链路（2026-10-28）**：本文的 USB v1 是**单板时期**的链路。
+> 当前 **CAN v4 是唯一主链路**；本文仅作历史与 USB 备用路径参考。
+
 回应 `rak 仓 docs/protocol/PROTOCOL_ALIGN_PACKET.md` §8 的 7 项确认。
 状态：**v1 已实现并烧 A 板**（build_tag R16，commit 见 git log），v1.1 暂不实现。
 实现在 `Core/Src/app_serial.c`（COBS 解码于 USART IRQ 逐字节跑，TX 走 TXE 中断续发）。

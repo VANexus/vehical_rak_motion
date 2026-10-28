@@ -2,8 +2,17 @@
 
 # C30D 板级资源表（权威）
 
-**唯一出处**：`../car2/tools/references/smart-transport-robot/01_课程设计-智能搬运机器人/装配参考资料/手册文档/STM32F407VET6(C30D-V2.1_V2.2)主板资源分配说明.pdf`（标题写 C30D-**V2.0**，正文按 V2.1/V2.2 文件名收录；以手中 PCB 丝印再对一次）。
-本表由该 PDF 逐行提取，并与 `car2/docs/hardware.md`、`car2/four-motor-*/main.c` 的寄存器配置交叉验证。
+**唯一出处**（本仓内，可复核）：`docs/WHEELTEC L150Pro 智能小车资料_V2.1_2026.04.20.zip` 内的
+`9.原理图/C30D 原理图和资源分配表/STM32F407VET6(C30D-V2.1_V2.2)主板资源分配说明.pdf`。
+该 PDF 标题写 C30D-**V2.0**，与同目录 `旧版/STM32F407VET6(C30D-V2.0)主板资源分配说明.pdf`
+**逐字节相同**（MD5 `42c671a7d5809e5d9e22f888949b25d3`），故引脚表跨版本通用。
+
+**版本差异**（据包内 `旧版/2.0版和2.1版区别说明.txt`、`旧版/2.1和2.2版本区别说明.txt` 原文）：
+- 2.0 → 2.1：换 MOS 管、调整显示屏位置元器件摆放 —— **「资源引脚无调整」**
+- 2.1 → 2.2：电源电路优化、CAN 改 XH2.54 端子、去掉 SBUS 航模接口、加版本识别电阻
+  —— **「尺寸孔位、控制使用、代码，2.1 和 2.2 版本之间无差异」**
+
+→ **V2.0 / V2.1 / V2.2 三版引脚分配完全一致**，本表通用。
 
 > ⚠️ 板上 MCU = **STM32F407VET6**，两块叶子板**硬件完全相同，只是装配角色不同**（用户确认）。所以本表同时是运动板和边缘 AI 板的板级定义。
 
@@ -69,9 +78,20 @@
 
 ## 6. 时钟与 1 Mbps 的前提（必须处理）
 
-骨架当前是 **HSI + PLL → 168 MHz**（`Core/Src/main.c` 的 `SystemClock_Config`，`.ioc` 里 PH0/PH1 已设为 HSE 振荡器模式但时钟树没用它）。
+**已核实（2026-10-14，读生成代码）**：两个工程的时钟树**都已经是 HSE**，无需再切。
+`Core/Src/main.c` 的 `SystemClock_Config()` 实测：
 
-**CAN 1 Mbps 对时钟精度极其敏感，HSI 的量级不够**（HSI 是百分比分级的温度相关精度，CAN 1 Mbps 需要 ppm 级）。板上 PH0/PH1 有 8 MHz 晶振位（`.ioc` 已按外部晶振配置）。→ **工程化第一步把时钟树切到 HSE**，否则 1 Mbps 联机时会出现偶发错误帧，且这种问题极难定位。相关风险与验证方法见 [`protocol.md`](PROTOCOL.md) §3。
+```c
+RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+RCC_OscInitStruct.HSEState       = RCC_HSE_ON;
+RCC_OscInitStruct.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
+RCC_OscInitStruct.PLL.PLLM = 4;   RCC_OscInitStruct.PLL.PLLN = 168;
+RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;   /* 8/4*168/2 = 168 MHz */
+```
+
+> ⚠️ 本节此前写「骨架当前是 **HSI** + PLL…工程化第一步把时钟树切到 HSE」，是**过期描述**（与生成代码和 `README.md` §2 均不符），已删除。留着它会让团队去做一件早已完成的事，而掩盖真正的 1 Mbps 风险点。
+
+**CAN 1 Mbps 对时钟精度极其敏感，HSI 的量级不够**（HSI 是百分比分级的温度相关精度，CAN 1 Mbps 需要 ppm 级）。板上 PH0/PH1 的 8 MHz 晶振已启用。相关风险与验证方法见 [`PROTOCOL.md`](PROTOCOL.md) §3。
 
 ## 7. 交叉验证过的历史事实（来自台架期）
 
@@ -81,4 +101,8 @@
 - 烧录后必须真断电冷启动（ART 指令缓存），以屏上 `build_tag` 判别实际运行版本。
 - 动力电源 = 板顶蓝色螺丝端子 + ON/OFF 开关；ST-LINK 读到的 3.2 V 只代表 MCU 侧。
 
-细节出处见 ``../car2/docs/hardware.md``（路径在工作区根，本仓不包含）、``../car2/README3.md``（路径在工作区根，本仓不包含） §6/§8。
+板级事实的最终出处 = 上述 WHEELTEC 资料包内的原理图（`9.原理图/C30D 原理图和资源分配表/STM32F407VET6控制器原理图（C30D_V2.2）.pdf`）
+与资源分配说明 PDF，两者都在本仓 `docs/` 的 zip 内，**可复核**。
+
+⚠️ 本节（§7）的历史实测数据出自**已弃用的 `car2` 台架归档**（工作区已移除，见 `AGENTS.md` §1）。
+按事实分级它们属于「**转述，待重新实测**」——上板前不要当作已确认值。
