@@ -140,7 +140,19 @@ static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 volatile uint8_t car_drive_gate_dbg;   /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-10，协议冻结版） */
 static uint8_t reset_cause;
-const char build_tag[] = "R69";   /* [AI] R65（2026-10-29）：IMU 6 轴扩展 —— 同一事务 14 字节块读
+const char build_tag[] = "R73";   /* [AI] R73（2026-10-29）：+ 桥接可观测量
+  *   （0x2050 cmd_en / 0x2051 cmd_age_ms / 0x2052 car_state）与设备标识
+  *   0x2F00 tag_packed / 0x2F01 reset_cause。
+  *   注：CiA 推荐的 0x1008/1009/100A（VISIBLE_STRING）实测触发 HardFault
+  *   （CANopenNode v4 + 本移植层组合，见 docs/CANOPEN-V5.md §7 坑 4），已回退；
+  *   名称/厂商信息暂由 EDS [DeviceInfo] 承担。
+  * 原 R72：CANopen v5 P1 —— 完整 OD/PDO 桥接。
+  * 19 个厂商对象；RPDO1=四轮速、RPDO2=命令序号/远程门；TPDO1=轮速、TPDO2/3=轮位、
+  * TPDO4=IMU；100 Hz 命令/反馈，deadman 100 ms。v4 app_can.c 仍在开关后可回滚。
+  * 原 R71：CANopen v5 P0（栈接入、Pre-operational、心跳/SDO）。
+  * 原 R70：OLED 修复 —— PD11-14 由开漏改推挽
+  * （.ioc + gpio.c 同步，CubeMX 生成）。软 SPI 靠推挽拉高；此前开漏且无上拉，屏全黑。
+  * CAN / 电机 / 协议零改动（R69 基线：IMU 6 轴扩展 —— 同一事务 14 字节块读
   * （accel6+temp2+gyro6），新增倾角/冲击/帧间偏航增量；新增 CAN 0x032 CHASSIS_IMU（100 Hz，
   * 纯加法，事件位含 slip，沿用 R58 起 dbg_slip 判据）。陀螺 Z 路径与稳定器/航向逻辑一字未动。
   * 原 R64: 双板架构（2026-10-28）——舵机迁到机械臂板 vehical_rak_arm：删 app_servo（6 路舵机）、删 CAN 0x110/111 ARM_CMD 解析、删 0x210/211 SERVO_STATE 上行；底盘板只留 4 轮闭环 + IMU + CAN。协议 ID/字节布局未变（Jetson 侧零改动）。原 R63: ARM_CMD 换算乘法改 int64 中间量（R62 因子放大后 int32 在 raw>1230° 溢出回绕，e2e 实测 270°→23.8°）；R62: 修 CAN ARM_CMD 量化因子 10× 错（R49 起 0.1°→urad 写成 ×174.533，命令角缩至 1/10——生产路径 e2e 首次非零实测暴露，命令 Home 225° 实动 22.4°）；R61: CAN v4 冻结版——协议内容冻结（驱动门自诊断位图并入 STATE bit6-10，docs/PROTOCOL.md 标 FROZEN），急停全权走 CAN（R59 按钮 PE0 硬件故障禁用，PROTOCOL §6.1 固化）；R54: 回退 R53 栈扩容（4096 打爆 FreeRTOS 堆→任务创建失败→复位循环，uwTick 实测 800ms 循环）；栈溢出假设证伪，幽灵再锁存另查；R52: CAN 清急停跳过 PD3 门（实测断电后 PD3 读高导致所有清除路径被拒；开关藏车内，远程清除语义要求；保留电池+非FAULT+fast_req 门，按钮路径原门不变）；R51: bxCAN 过滤器运行时自愈 @1Hz（RX 静默死亡根因：FA1R.FACT0 被清+FFA1R.FFA0 被置→帧被 ACK 但被过滤器拒收不进 FIFO；SWD 三次稳定读数实锤；与邮箱 ABRQ 自愈同思路）；R50: CAN CLEAR_ESTOP 启用（用户指定：按钮藏车内难按）——0x010 CMD=5 ISR 置请求、1kHz 任务经 car_estop_clear 安全门落地（PD3 使能开关+电池+非 FAULT，与按钮短按同门）；R49: CAN v4 主链路（docs/PROTOCOL.md v4）——app_can.c 重写：下行 0x100 DRIVE_CMD(4×int16 0.01rad/s→urad/s)+0x110/111 ARM_CMD(7×uint16 0.1°→urad, A/B 组齐才落地)+0x010 SAFETY（急停 ISR 快速路径不变，START/STOP 开关 CAN 远程门 can_remote，CLEAR_ESTOP 仍仅按钮）；上行 0x200/201 WHEEL_POS(原始 counts,100Hz)+0x202 WHEEL_SPD(urad/s÷10^4,100Hz)+0x210/211 SERVO_STATE(脉宽→0.1°,50Hz)+0x220 DIAG(10Hz,STATE 位图+MODE+bus-off 计数)+0x030 NODE_INFO(1Hz)；DRIVE 断流 100ms deadman 清零+STATE.bit3；v3 XFER/VEL_FB/NODE_INFO@0x230 作废，can_arm_seen 等恒 0 仅为 UART v1 备用路径编译；新增 car_wheel_positions()/servo_get_pulse() 遥测访问器；R48: 外设配置再收敛——ADC1 改 DMA 连续转换（ContinuousConvMode/DMAContinuousRequests ENABLE + DMA2_Stream0 循环，battery_read_mv 只读缓冲均值，消除 100 Hz 任务里最多 1 ms 的 Start/Poll/Stop 阻塞）；PE0 按键改 EXTI 双沿中断（.ioc GPXTI0+上拉，EXTI0 优先级 7，ISR 只置标志、消抖仍在 100 Hz 任务）；R47: IMU 角速度 α=1/4 一级 IIR（稳定器/航向共用，imu_dbg_still_range 供 IMU_STILL_LSB 实测标定）；编码器位置符号按学习极性对齐（学习≠预置时翻转位移，防上位机里程计反向）；R46: 轮级稳定 P→PD（wheel_control_stabilize 增 D 项：角加速度域，1/4 EMA 差分，KD=150‰ 单点在 WHEEL_STAB_KD_PERMILLE，稳定链路断开时清 D 状态防踢）；BOARD-C30D.md 澄清 PB12 未启用；R45: 复位原因识别改走 HAL 宏（__HAL_RCC_GET_FLAG），car_init 不再直写 RCC->CSR——R20 规范补漏；R44: 上电默认位=Home 安全位（servo_init 输出 500/2166/2500/500/500/500µs = 指令 0/225/270/0/0/0，与 SRDF home 一致），不再先去 1500µs 中位；R43: 按钮生产化——短按=清急停锁存、长按=本地急停，台架启动/自检按钮触发移除；R42: ARM 命令落地（ARM_COMMAND→servo_set_pulse，axis J1..J6+夹爪→ch5..ch0，0~270°↔500~2500µs）；R41: 舵机测试收官；R39: 遥测 EMA；R38: encoder_sign 持久化；R37: 使能门放宽；R36-R33: 反馈守卫/死锁/判向链；R31-R30: 零位检查/轮标定首填；R28: CubeMX 全量迁移 */

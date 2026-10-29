@@ -1,0 +1,222 @@
+{
+  "node": "chassis",
+  "product": "RAK Chassis",
+  "product_number": 1,
+  "vendor_id": 0,
+  "revision": 5,
+  "objects": [
+    {
+      "index": "0x2000",
+      "name": "w1spd",
+      "type": "int16",
+      "access": "rw",
+      "pdo": "rpdo1"
+    },
+    {
+      "index": "0x2001",
+      "name": "w2spd",
+      "type": "int16",
+      "access": "rw",
+      "pdo": "rpdo1"
+    },
+    {
+      "index": "0x2002",
+      "name": "w3spd",
+      "type": "int16",
+      "access": "rw",
+      "pdo": "rpdo1"
+    },
+    {
+      "index": "0x2003",
+      "name": "w4spd",
+      "type": "int16",
+      "access": "rw",
+      "pdo": "rpdo1"
+    },
+    {
+      "index": "0x2010",
+      "name": "w1spd_fb",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo1"
+    },
+    {
+      "index": "0x2011",
+      "name": "w2spd_fb",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo1"
+    },
+    {
+      "index": "0x2012",
+      "name": "w3spd_fb",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo1"
+    },
+    {
+      "index": "0x2013",
+      "name": "w4spd_fb",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo1"
+    },
+    {
+      "index": "0x2020",
+      "name": "w1pos",
+      "type": "int32",
+      "access": "ro",
+      "pdo": "tpdo2"
+    },
+    {
+      "index": "0x2021",
+      "name": "w2pos",
+      "type": "int32",
+      "access": "ro",
+      "pdo": "tpdo2"
+    },
+    {
+      "index": "0x2022",
+      "name": "w3pos",
+      "type": "int32",
+      "access": "ro",
+      "pdo": "tpdo3"
+    },
+    {
+      "index": "0x2023",
+      "name": "w4pos",
+      "type": "int32",
+      "access": "ro",
+      "pdo": "tpdo3"
+    },
+    {
+      "index": "0x2030",
+      "name": "imu_dyaw",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo4"
+    },
+    {
+      "index": "0x2031",
+      "name": "imu_pitch",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo4"
+    },
+    {
+      "index": "0x2032",
+      "name": "imu_roll",
+      "type": "int16",
+      "access": "ro",
+      "pdo": "tpdo4"
+    },
+    {
+      "index": "0x2033",
+      "name": "imu_evt",
+      "type": "uint8",
+      "access": "ro",
+      "pdo": "tpdo4"
+    },
+    {
+      "index": "0x2034",
+      "name": "imu_age",
+      "type": "uint8",
+      "access": "ro",
+      "pdo": "tpdo4"
+    },
+    {
+      "index": "0x2040",
+      "name": "cmd_seq",
+      "type": "uint32",
+      "access": "rw",
+      "pdo": "rpdo2"
+    },
+    {
+      "index": "0x2041",
+      "name": "cmd_flags",
+      "type": "uint16",
+      "access": "rw",
+      "pdo": "rpdo2"
+    },
+    {
+      "index": "0x2050",
+      "name": "cmd_en",
+      "type": "uint8",
+      "access": "ro"
+    },
+    {
+      "index": "0x2051",
+      "name": "cmd_age_ms",
+      "type": "uint16",
+      "access": "ro"
+    },
+    {
+      "index": "0x2052",
+      "name": "car_state",
+      "type": "uint16",
+      "access": "ro"
+    },
+    {
+      "index": "0x2053",
+      "name": "car_mode",
+      "type": "uint8",
+      "access": "ro"
+    },
+    {
+      "index": "0x2F00",
+      "name": "tag_packed",
+      "type": "uint32",
+      "access": "ro"
+    },
+    {
+      "index": "0x2F01",
+      "name": "reset_cause",
+      "type": "uint8",
+      "access": "ro"
+    }
+  ],
+  "pdo": {
+    "rpdo1": [
+      "0x2000",
+      "0x2001",
+      "0x2002",
+      "0x2003"
+    ],
+    "tpdo1": [
+      "0x2010",
+      "0x2011",
+      "0x2012",
+      "0x2013"
+    ],
+    "tpdo2": [
+      "0x2020",
+      "0x2021"
+    ],
+    "tpdo3": [
+      "0x2022",
+      "0x2023"
+    ],
+    "tpdo4": [
+      "0x2030",
+      "0x2031",
+      "0x2032",
+      "0x2033",
+      "0x2034"
+    ],
+    "rpdo2": [
+      "0x2040",
+      "0x2041"
+    ]
+  },
+  "tpdo_types": {
+    "tpdo1": 5,
+    "tpdo2": 5,
+    "tpdo3": 5,
+    "tpdo4": 5
+  },
+  "identity": {
+    "device_name": "RAK CHASSIS",
+    "hw_version": "C30D V2.2",
+    "sw_version": "R73"
+  }
+}

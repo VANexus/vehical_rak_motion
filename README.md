@@ -1,5 +1,50 @@
 # vehical_rak_motion — 底盘板固件（STM32F407VET6 / C30D）
 
+## CANopen v5（当前生效的通信栈）
+
+- 规范件：`docs/CANOPEN-V5.md`；设计与实测进度：`docs/CANOPEN-V5-DESIGN.md`（同步自伞形 `docs/superpowers/specs/`）。
+- 现成栈：`third_party/canopen/CANopenNode`（v4，含 CiA 304 SRDO）+ `CANopenNode_STM32`（官方 HAL 移植层），Apache-2.0；
+  对上游的 4 处改动与原因见 `third_party/canopen/PATCHES.md`（**改上游必须记**）。
+- 节点：本仓 **node 1**（底盘板）；另一块板 node 2，Jetson = NMT 主站 node 127。SYNC 2 ms。
+- 对象清单（单一来源）：`docs/canopen/chassis.json` → `docs/canopen/chassis.eds` → `Core/Inc/OD.h` + `Core/Src/OD.c`。
+
+### 改了对象/PDO 之后怎么重生成（不要手改 OD.c/OD.h）
+
+```bash
+python3 tools/canopen/gen_eds.py docs/canopen/chassis.json tools/canopen/template.eds docs/canopen/chassis.eds
+# 官方 CANopenEditor CLI（需 .NET；本机用 dotnet-sdk-10.0 + DOTNET_ROLL_FORWARD=Major 跑 net8.0）
+dotnet <CANopenEditor>/EDSSharp/bin/Release/net8.0/EDSSharp.dll \
+       --infile docs/canopen/chassis.eds --outfile OD.c --type CanOpenNodeV4
+cp OD.c Core/Src/OD.c; cp OD.h Core/Inc/OD.h
+```
+
+### 门禁与台架验收
+
+```bash
+python3 tools/canopen_gate.py --repo .        # 清单↔EDS↔OD 一致、ODList 升序、PDO 禁用位
+python3 tools/canopen_bringup.py --can can0 --seconds 3 --no-drive   # NMT/SYNC/PDO 速率/SDO
+```
+
+- 心跳应为 `0x701`：上电 `7F`（Pre-operational）→ 主站 NMT Start 后 `05`。
+- TPDO 期望速率：`0x181/0x281/0x381/0x481` 各 100 Hz。
+- 桥接可观测量（SDO）：`0x2050 cmd_en`、`0x2051 cmd_age_ms`、`0x2052 car_state`、`0x2053 car_mode`。身份：`0x2F00`（build_tag 前 4 字符小端打包）、`0x2F01`（复位原因）。
+- ⚠️ 三个已知坑（未用 PDO 的 COB-ID bit31、RX 过滤器遍历方向、EDS 段落顺序决定 ODList 顺序）
+  已固化在 `gen_eds.py` / `PATCHES.md` / `CANOPEN-V5.md` §7 里，别绕过生成器手改。
+
+### 回滚到 v4
+
+`cmake --preset Debug -DAPP_USE_CANOPEN=OFF`（v4 的 `Core/Src/app_can.c`、`docs/PROTOCOL.md`、
+`tools/can_check.py` 都还在）。**同一总线禁止混跑 v4/v5**：ID 直接冲突，整套一起换。
+
+
+> **CAN 协议已于 2026-10-29 切到 v5（CANopen）** —— 规范件 `docs/CANOPEN-V5.md`，
+> 门禁 `python3 tools/canopen_gate.py`，台架验收 `python3 tools/canopen_bringup.py`。
+> 本文里凡提到 `can_check.py` / `protocol-signals.yaml` / `PROTOCOL.md`(v4) / `can_protocol.h`
+> 的条目**只适用于 v4 回滚分支**（`cmake -DAPP_USE_CANOPEN=OFF`）。
+> 当前在板 build_tag：底盘 **R73** / 机械臂 **A14**；Jetson `rak` 侧仍是 v4 主站，
+> 与 v5 板子不兼容，联调暂用上面的 `canopen_bringup.py`（生产主站 = 待办 P3）。
+
+
 **四轮麦轮底盘**：四路 AT8236 电机驱动 + 四路正交编码器 + SSD1306 OLED + 板载 IMU，
 四轮 **25 kHz 硬实时速度闭环**，由 Jetson 上位机经 **CAN v4 @1 Mbps** 控制。
 

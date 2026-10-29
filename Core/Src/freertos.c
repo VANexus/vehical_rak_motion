@@ -30,6 +30,7 @@
 #include "app_bt.h"      /* [AI] R67 */
 #include "app_car.h"
 #include "app_can.h"
+#include "app_canopen.h"
 #include "app_oled.h"
 /* USER CODE END Includes */
 
@@ -162,7 +163,9 @@ static void task_control(void *argument)
   TickType_t last = xTaskGetTickCount();
   car_start_control_isr();   /* [AI]  R3: 25kHz ISR 延迟到调度器启动后开 */
   for (;;) {
-    car_control_step(HAL_GetTick());
+    uint32_t now = HAL_GetTick();
+    app_canopen_step(now);                           /* v5: CANopen 命令/反馈桥接 */
+    car_control_step(now);
     vTaskDelayUntil(&last, pdMS_TO_TICKS(10));      /* 100 Hz */
   }
 }

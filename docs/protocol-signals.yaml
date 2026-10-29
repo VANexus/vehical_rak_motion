@@ -1,3 +1,4 @@
+# LEGACY(v4) 单一来源：仅服务 v4 回滚分支；v5 的单一来源是 docs/canopen/<node>.json + .eds
 # CAN 协议 v4 —— 机器可读的信号数据库（单一来源）
 # 规范性文字见 protocol.md；本文件是两端（STM32 C / Jetson C++）+ CI 共同的编码依据。
 # 校验与测试向量生成：python3 tools/can_check.py

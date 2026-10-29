@@ -1,5 +1,11 @@
 # CAN 通信协议 v4（两端对接规范，规范性文档）
 
+> ⚠️ **v4 已降级为「回滚文档」**（2026-10-29）：线上规范是 **CANopen v5** →
+> 同目录 [`CANOPEN-V5.md`](CANOPEN-V5.md)；设计依据与实测进度见
+> [`docs/superpowers/specs/2026-10-29-can-v5-canopen-design.md`](../superpowers/specs/2026-10-29-can-v5-canopen-design.md)。
+> 本文件仅在 `cmake -DAPP_USE_CANOPEN=OFF` 编回 v4 时作为对照，**不再演进**。
+> **禁止同一总线混跑 v4/v5**（`0x100`、`0x200/0x201`、`0x210/0x211`、`0x220` 等 ID 直接冲突）。
+
 适用范围：Jetson（`rak`，Orin Nano + SN65HVD230）↔ 底盘板 F407（`vehical_rak_motion`）↔ 机械臂板 F407（`vehical_rak_arm`）。
 **这是两端的通信事实来源**：MCU 侧编解码、Jetson 侧编解码、以及本文的测试向量三者必须逐字节一致。任何一方改协议，必须先改 [`protocol-signals.yaml`](protocol-signals.yaml) 并重跑 `tools/can_check.py`。
 

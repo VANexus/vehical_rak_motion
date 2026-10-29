@@ -48,7 +48,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_car.c
     Core/Src/app_sign_store.c
     Core/Src/app_wheel_control.c
-    Core/Src/app_can.c
     Core/Src/app_can_control_policy.c
     Core/Src/app_serial.c
     Core/Src/app_serial_session.c
@@ -80,6 +79,54 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# ---------------------------------------------------------------------------
+# CAN v5：CANopenNode v4 + 官方 STM32 移植层（Apache-2.0）
+#
+# 第三方源码单独编成 canopen 静态库：不继承本工程的 -Wextra/-Wshadow/
+# -Wdouble-promotion 口径，避免上游风格差异淹没自家告警。
+# CO_USE_GLOBALS：静态分配所有 CANopen 对象，不走 newlib malloc。
+# ---------------------------------------------------------------------------
+set(CANOPEN_NODE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/canopen/CANopenNode)
+set(CANOPEN_STM32_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/canopen/CANopenNode_STM32)
+
+add_library(canopen STATIC
+    ${CANOPEN_NODE_DIR}/CANopen.c
+    ${CANOPEN_NODE_DIR}/301/CO_ODinterface.c
+    ${CANOPEN_NODE_DIR}/301/CO_NMT_Heartbeat.c
+    ${CANOPEN_NODE_DIR}/301/CO_HBconsumer.c
+    ${CANOPEN_NODE_DIR}/301/CO_Emergency.c
+    ${CANOPEN_NODE_DIR}/301/CO_SDOserver.c
+    ${CANOPEN_NODE_DIR}/301/CO_TIME.c
+    ${CANOPEN_NODE_DIR}/301/CO_SYNC.c
+    ${CANOPEN_NODE_DIR}/301/CO_PDO.c
+    ${CANOPEN_NODE_DIR}/301/crc16-ccitt.c
+    ${CANOPEN_NODE_DIR}/303/CO_LEDs.c
+    ${CANOPEN_NODE_DIR}/305/CO_LSSslave.c
+    ${CANOPEN_STM32_DIR}/CO_app_STM32.c
+    ${CANOPEN_STM32_DIR}/CO_driver_STM32.c
+)
+
+target_include_directories(canopen PUBLIC
+    ${CANOPEN_NODE_DIR}
+    ${CANOPEN_STM32_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc
+)
+
+target_compile_definitions(canopen PUBLIC CO_USE_GLOBALS)
+target_compile_options(canopen PRIVATE -w)
+target_link_libraries(canopen PUBLIC stm32cubemx)
+
+option(APP_USE_CANOPEN "Build with CANopen v5 stack (disable to build v4 app_can.c)" ON)
+if(APP_USE_CANOPEN)
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+        Core/Src/app_canopen.c
+        Core/Src/OD.c
+    )
+    target_link_libraries(${CMAKE_PROJECT_NAME} canopen)
+else()
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE Core/Src/app_can.c)
+endif()
 
 #
 # ---------------------------------------------------------------------------

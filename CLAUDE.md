@@ -1,5 +1,13 @@
 # CLAUDE.md
 
+> **CAN 协议已于 2026-10-29 切到 v5（CANopen）** —— 规范件 `docs/CANOPEN-V5.md`，
+> 门禁 `python3 tools/canopen_gate.py`，台架验收 `python3 tools/canopen_bringup.py`。
+> 本文里凡提到 `can_check.py` / `protocol-signals.yaml` / `PROTOCOL.md`(v4) / `can_protocol.h`
+> 的条目**只适用于 v4 回滚分支**（`cmake -DAPP_USE_CANOPEN=OFF`）。
+> 当前在板 build_tag：底盘 **R73** / 机械臂 **A14**；Jetson `rak` 侧仍是 v4 主站，
+> 与 v5 板子不兼容，联调暂用上面的 `canopen_bringup.py`（生产主站 = 待办 P3）。
+
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 先读
