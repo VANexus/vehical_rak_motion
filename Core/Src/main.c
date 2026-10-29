@@ -22,6 +22,7 @@
 #include "adc.h"
 #include "can.h"
 #include "dma.h"
+#include "i2c.h"
 #include "iwdg.h"
 #include "tim.h"
 #include "usart.h"
@@ -113,6 +114,8 @@ int main(void)
   MX_USART3_UART_Init();
   MX_TIM2_Init();
   MX_TIM5_Init();
+  MX_I2C2_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   car_init();      /* [AI]  R20: 复位原因 + 电机 PWM/编码器启动(IMU 探测;外设初始化已由 MX 完成) */
   can_init();      /* [AI]  R20: CAN 过滤器/启动/通知 + 接收队列 */

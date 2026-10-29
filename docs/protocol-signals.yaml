@@ -12,8 +12,22 @@
 #      帧 ID 与字节布局一字未动（同总线 ID 全局唯一 → Jetson 侧零改动）。
 #   2) 机械臂板新增两帧自己的上行：0x031 ARM_NODE_INFO、0x221 ARM_DIAG
 #      （否则与底盘板的 0x030 / 0x220 同 ID 撞车）。
-#   3) 协议版本号仍是 4（NODE_INFO.PROTO 不变）——为了不让 Jetson 侧握手判据失效。
+#   3) 协议版本号仍是 4（NODE_INFO.PROTO 不变）——为了不让 Jetson 侧握手判据失效 。
 #      新增帧属**加法**，不破坏既有帧，Jetson 侧可以先不订阅。
+#
+# 2026-10-29 修订（三颗 IMU 全部启用，**纯加法**，仍是协议 4）：
+#   1) 底盘板新增 0x032 CHASSIS_IMU（100 Hz，软 I2C 上限）：航向增量 + 倾角 + 事件位
+#      （impact / slip / still / saturated），供 Jetson EKF 在 100 Hz 轮速帧之间补运动、
+#      并用 slip 位给轮速降权。
+#   2) 机械臂板新增 0x222 ARM_IMU（100 Hz）：偏航角速率 + 加速度模值 + 事件位。
+#      **重要前提（2026-10-29 用户确认）**：三颗 IMU 全部装在**车体**上，机械臂板
+#      并不在机械臂上。所以这颗不是“臂端 IMU”，而是同一刚体上的**第二颗**：
+#         - 刚体上任意点角速度相同 → 它的 GZ 与底盘板 GZ **可逐样本互校**（冗余/故障判别）；
+#         - 加速度受安装位置影响（α×r + ω²r），只用于模值/冲击，不做姿态。
+#      机械臂碰撞确认靠“车静止 + 冲击尖峰 + 轮速为零”三者同时成立（车在动时分不清
+#      是压到坑洼还是臂撞了限位，此帧只报 bump 事件，不参与任何控制判决）。
+#   3) 两帧都是**事件/增量**，不是姿态本体：权威姿态仍在 Jetson 的 LSM6DSR。
+#   4) 既有帧 ID / 字节布局 / 量化因子一字未动。
 #
 # 约定：
 #   byte_order: little        -> Intel/小端（低字节在低地址）
@@ -41,6 +55,9 @@ bus:
 units:
   rad_s:  {factor: 0.01, unit: rad/s}
   deg:    {factor: 0.1,  unit: deg}
+  mrad:   {factor: 0.001, unit: rad}
+  deg10:  {factor: 0.01, unit: deg}
+  mg:     {factor: 1,    unit: mg}
   counts: {factor: 1,    unit: counts}
   mv:     {factor: 1,    unit: mV}
 
@@ -72,6 +89,14 @@ state_bits:                # STATE_u16 位图（DIAG / NODE_INFO 上报）
   bit9: dg_snapshot        # 1 = 编码器快照 4/4 有效且新鲜
   bit10: dg_stab           # 1 = 稳定补偿+定点换算完成（命令实际落地）
   bit11_15: reserved
+
+imu_event_bits:            # CHASSIS_IMU.EVT_u8 / ARM_IMU.EVT_u8（2026-10-29 新增）
+  bit0: impact             # 1 = 冲击（|a| 突变超阈）；机械臂板还表示“碰撞确认”
+  bit1: slip               # 1 = 打滑/空转（仅底盘板：|陀螺偏航率 - 轮速偏航率| 超阈）
+  bit2: still              # 1 = 静止（零偏自标定窗口成立）
+  bit3: saturated          # 1 = 加速度/角速度接近满量程（可信度下降）
+  bit4: stale              # 1 = 样本陈旧（>20 ms 无新样本）
+  bit5_7: reserved
 
 # deadman / 超时（ms）
 timeout_ms:
@@ -194,6 +219,25 @@ messages:
     layout: raw8
     signals: [FAULT_u16, STATE_u16, MODE_u8, SERVO_ERRCNT_u8, RSVD16]
 
+  # ---- IMU 上行（2026-10-29 新增，纯加法）----
+  # 定位：**不是姿态本体**，而是“增量 + 事件”。权威姿态仍在 Jetson 的 LSM6DSR。
+  - id: 0x032
+    name: CHASSIS_IMU
+    data_id: 0x0F
+    cycle_hz: 100          # 与轮速帧同频但**独立**（陀螺积分优于轮速差分）；
+                           # 升到 200-400 Hz 需先换硬件 I2C2+DMA（P2，暂被 CubeMX 阻塞）
+    dir: chassis->jetson
+    layout: raw8
+    signals: [DYAW_i16, PITCH_i16, ROLL_i16, EVT_u8, AGE_u8]
+
+  - id: 0x222
+    name: ARM_IMU
+    data_id: 0x10
+    cycle_hz: 100
+    dir: arm->jetson
+    layout: raw8
+    signals: [GZ_i16, AMAG_u16, EVT_u8, AGE_u8, RSVD16]
+
 # 信号字典：bit 长度 / 有无符号 / factor / min / max
 signals:
   W1SPD_i16: {len: 16, signed: true,  factor: 0.01, min: -327.67, max: 327.67, desc: 轮1 目标/实测角速度 rad/s（前转正）}
@@ -222,8 +266,15 @@ signals:
   HWREV_u8:  {len: 8,  signed: false, factor: 1,    min: 0, max: 255,  desc: 硬件版本}
   BUILD_u16: {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: 固件构建标识（git short hash 折 16 位）}
   SCMD_u16:  {len: 16, signed: false, factor: 1,    min: 0, max: 65535, desc: SAFETY_CMD 命令码（低 4 位有效）}
-  RSVD16:    {len: 16, signed: false, factor: 1,    min: 0, max: 0,    desc: 保留，必须填 0}
-  RSVD8:     {len: 8,  signed: false, factor: 1,    min: 0, max: 0,    desc: 保留，必须填 0}
+  RSVD16:    {len: 16, signed: false, factor: 1,    min: 0, max: 0,    desc: 保 留，必须填 0}
+  RSVD8:     {len: 8,  signed: false, factor: 1,    min: 0, max: 0,    desc: 保 留，必须填 0}
+  DYAW_i16:  {len: 16, signed: true,  factor: 0.001, min: -32.767, max: 32.767, desc: 本帧区间内的偏航角增量 rad（底盘 IMU 陀螺 Z 积分）}
+  PITCH_i16: {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 俯仰角 deg（加速度计重力方向解算，未融合）}
+  ROLL_i16:  {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 横滚角 deg（同上）}
+  GZ_i16:    {len: 16, signed: true,  factor: 0.01,  min: -327.67, max: 327.67, desc: 偏航角速率 deg/s（第二颗车体 IMU，与 0x032 同源刚体 → 可互校）}
+  AMAG_u16:  {len: 16, signed: false, factor: 1,     min: 0, max: 65535, desc: 加速度模值 mg（含重力；静止≈1000，冲击时尖峰）}
+  EVT_u8:    {len: 8,  signed: false, factor: 1,     min: 0, max: 255, desc: IMU 事件位图（imu_event_bits）}
+  AGE_u8:    {len: 8,  signed: false, factor: 1,     min: 0, max: 255, desc: 样本龄 ms（饱和 255，用于判断新鲜度）}
 
 # 一致性测试向量（两端都必须复现同样的字节）
 vectors:
@@ -241,3 +292,5 @@ vectors:
   - {msg: DIAG,          name: VC, values: {BAT_u16: 11100, FAULT_u16: 0, STATE_u16: 0x0003, MODE_u8: 1, BUSOFFCNT_u8: 0}}
   - {msg: ARM_NODE_INFO, name: VD, values: {PROTO_u8: 4, HWREV_u8: 1, BUILD_u16: 0x1234, FAULT_u16: 0, STATE_u16: 0x0000}}
   - {msg: ARM_DIAG,      name: VE, values: {FAULT_u16: 0, STATE_u16: 0x0003, MODE_u8: 1, SERVO_ERRCNT_u8: 0, RSVD16: 0}}
+  - {msg: CHASSIS_IMU,   name: VF, values: {DYAW_i16: 123, PITCH_i16: -150, ROLL_i16: 250, EVT_u8: 0x03, AGE_u8: 4}}
+  - {msg: ARM_IMU,       name: V10, values: {GZ_i16: -1234, AMAG_u16: 1450, EVT_u8: 0x01, AGE_u8: 9, RSVD16: 0}}

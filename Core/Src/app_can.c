@@ -14,6 +14,7 @@
 #include "app_can.h"
 #include "app_car.h"
 #include "app_can_control_policy.h"
+#include "app_imu.h"
 #include "app_serial.h"
 #include "main.h"
 #include "can.h"
@@ -40,6 +41,7 @@
 #define CID_WHEEL_POS_A  0x200U
 #define CID_WHEEL_POS_B  0x201U
 #define CID_WHEEL_SPD    0x202U
+#define CID_CHASSIS_IMU  0x032U     /* [AI] R65: 100 Hz IMU 增量/事件帧（纯加法） */
 #define CID_DIAG         0x220U
 #define PROTO_VER        4U
 #define HW_REV           1U
@@ -350,6 +352,24 @@ void can_tx_task_step(uint32_t now_ms)
     }
     /* [AI] 相位错开原则：ph%10==0 的轮位爆发(3帧)占满 3 邮箱，DIAG/NODE_INFO
        必须落在 %10!=0 且避开 %20==5(舵机×2) 的相位，否则作为第 4 帧必然被丢。 */
+    if (ph % 10U == 4U) {                            /* [AI] R65: 100 Hz：CHASSIS_IMU */
+        float pitch = 0.0f, roll = 0.0f;
+        imu_tilt_deg(&pitch, &roll);
+        int32_t p10 = (int32_t)(pitch * 100.0f);
+        int32_t r10 = (int32_t)(roll * 100.0f);
+        if (p10 > 32767)  p10 = 32767;
+        if (p10 < -32767) p10 = -32767;
+        if (r10 > 32767)  r10 = 32767;
+        if (r10 < -32767) r10 = -32767;
+        uint8_t evt = imu_events();
+        if (dbg_slip != 0U) evt = (uint8_t)(evt | IMU_EVT_SLIP);
+        put_le16(&d[0], (uint16_t)imu_take_yaw_delta_mrad());
+        put_le16(&d[2], (uint16_t)(int16_t)p10);
+        put_le16(&d[4], (uint16_t)(int16_t)r10);
+        d[6] = evt;
+        d[7] = imu_age_ms();
+        (void)can_tx(CID_CHASSIS_IMU, d);
+    }
     if (ph % 100U == 55U) {                          /* 10 Hz：DIAG（55: 不撞轮位/舵机） */
         uint16_t st = state_bitmap(busoff_prev);
         put_le16(&d[0], (int32_t)car_battery_mv());

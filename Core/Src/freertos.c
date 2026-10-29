@@ -25,6 +25,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_dbg.h"
+#include "app_buzz.h"   /* [AI] R66 */
+#include "app_bt.h"      /* [AI] R67 */
 #include "app_car.h"
 #include "app_can.h"
 #include "app_oled.h"
@@ -137,6 +140,7 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
+  BOOT_MARK(6);
   (void)argument;   /* [AI]  未使用（其余四个任务同款写法），-Wextra 要求显式 */
   /* [AI] R41 舵机测试结束：defaultTask 恢复空转；R40 的极限互切测试代码
      已整体移除（R29~R40 实测结论记录在 git 历史 46ee418..本提交）。
@@ -176,18 +180,23 @@ static void task_can_tx(void *argument)
   (void)argument;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
-    can_tx_task_step(HAL_GetTick());
+    uint32_t now = HAL_GetTick();
+    can_tx_task_step(now);
+    buzz_tick(now);                                 /* [AI] R66: 蜂鸣器状态机 */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(1));       /* 1 kHz */
   }
 }
 
 static void task_status(void *argument)
 {
+  BOOT_MARK(7);
   (void)argument;
   TickType_t last = xTaskGetTickCount();
   for (;;) {
+    uint32_t now = HAL_GetTick();
     car_feed_watchdog();                            /* [AI]  10Hz 喂狗 */
-    oled_show_step(HAL_GetTick());                  /* [AI]  R13: OLED 调试显示(惰性初始化,内部 5Hz 重绘) */
+    oled_show_step(now);                            /* [AI]  R13: OLED 调试显示(惰性初始化,内部 5Hz 重绘) */
+    bt_step(now);                                   /* [AI] R67: 蓝牙 1 Hz 遥测（只发不收） */
     vTaskDelayUntil(&last, pdMS_TO_TICKS(100));     /* 10 Hz */
   }
 }

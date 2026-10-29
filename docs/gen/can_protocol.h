@@ -51,6 +51,12 @@ extern "C" {
 #define ARM_DIAG_ID 0x221u
 #define ARM_DIAG_DATA_ID 0x0Eu
 #define ARM_DIAG_HZ 10u
+#define CHASSIS_IMU_ID 0x032u
+#define CHASSIS_IMU_DATA_ID 0x0Fu
+#define CHASSIS_IMU_HZ 100u
+#define ARM_IMU_ID 0x222u
+#define ARM_IMU_DATA_ID 0x10u
+#define ARM_IMU_HZ 100u
 
 static inline uint8_t can_crc8(const uint8_t *d, uint8_t n, uint8_t data_id)
 {

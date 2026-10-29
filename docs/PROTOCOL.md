@@ -81,14 +81,16 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `0x211` | `SERVO_STATE_B` (J5,J6,夹爪) | **机械臂板**→Jetson | 50 Hz | 0x0B | raw8 |
 | `0x220` | `DIAG` | 底盘→Jetson | 10 Hz | 0x0C | raw8 |
 | `0x221` | `ARM_DIAG` | **机械臂板**→Jetson | 10 Hz | 0x0E | raw8 |
+| `0x032` | `CHASSIS_IMU` | 底盘→Jetson | **100 Hz**（2026-10-29 新增） | 0x0F | raw8 |
+| `0x222` | `ARM_IMU` | **机械臂板**→Jetson | **100 Hz**（2026-10-29 新增） | 0x10 | raw8 |
 
 ### 带宽核算（1 Mbps，经典帧含填充约 110–130 µs/帧）
 
 | 方向 | 帧率 | 来源 |
 | --- | --- | --- |
 | 下行 | 100 + 2×50 = 200 fps | DRIVE 100Hz + ARM 2×50Hz |
-| 上行 | 3×100 + 2×50 + 10 + 1 + 10 + 1 = 372 fps | 轮位×2 + 轮速 + 舵机×2 + DIAG + NODE_INFO + ARM_DIAG + ARM_NODE_INFO |
-| 合计 | **~572 fps ≈ 总线负载 7 %** | 死区余量 >10 倍，未来扩展（IMU、电流估计）有空间 |
+| 上行 | 3×100 + 2×50 + 10 + 1 + 10 + 1 + 100 + 100 = 572 fps | 轮位×2 + 轮速 + 舵机×2 + DIAG + NODE_INFO + ARM_DIAG + ARM_NODE_INFO + **CHASSIS_IMU 100Hz + ARM_IMU 100Hz** |
+| 合计 | **~772 fps ≈ 总线负载 9–10 %** | 仍有 >9 倍余量；软 I2C 限制底盘 IMU 暂为 100 Hz |
 
 ## 4. 帧信号表
 
@@ -108,6 +110,27 @@ uint8_t crc8(const uint8_t *d, uint8_t len, uint8_t data_id) {
 | `0x221 ARM_DIAG` | `FAULT` | `STATE` | `MODE` u8 + `SERVO_ERRCNT` u8 | 保留=0 |
 | `0x020 EMCY` | `FAULT` | `AUX` | `STATE` | 保留=0 |
 | `0x010 SAFETY_CMD` | `CMD` u16（低 4 位有效） | 保留=0 | 保留=0 | counter/flags=0 + CRC |
+| `0x032 CHASSIS_IMU` | `DYAW` i16 (mrad) | `PITCH` i16 (0.01°) | `ROLL` i16 (0.01°) | `EVT` u8 + `AGE` u8 |
+| `0x222 ARM_IMU` | `GZ` i16 (0.01°/s) | `AMAG` u16 (mg) | 保留=0 | `EVT` u8 + `AGE` u8 |
+
+### 3.1 IMU 帧的事件位（`EVT_u8`，两帧同义）
+
+| 位 | 名称 | 含义 |
+| --- | --- | --- |
+| bit0 | `impact` | 冲击（\|a\| 突变超阈）；机械臂板同时表示“碰撞确认” |
+| bit1 | `slip` | 打滑/空转（仅底盘板：\|陀螺偏航率 − 轮速偏航率\| 超阈） |
+| bit2 | `still` | 静止（零偏自标定窗口成立） |
+| bit3 | `saturated` | 接近满量程，可信度下降 |
+| bit4 | `stale` | 样本陈旧（>20 ms） |
+| bit5-7 | — | 保留，必须为 0 |
+
+> **前提（2026-10-29 用户确认）**：三颗 IMU 全部装在**车体**上（机械臂板不在机械臂上）。
+> 刚体上任意点角速度相同 → `0x032.DYAW` 与 `0x222.GZ` 是**同源冗余**，可逐样本互校；
+> 加速度受安装位置影响（α×r + ω²r），只用于模值/冲击。
+> 机械臂碰撞确认 = 车静止 + 冲击尖峰 + 轮速为零；车在动时只报 bump，不参与控制判决。
+>
+> 两帧都只传**增量/事件**，不传姿态本体：权威姿态仍是 Jetson 的 LSM6DSR（`/dev/i2c-7`，1000 Hz）。
+> MCU 侧不做跨总线融合（CAN 无同步时钟），只做预积分与本地事件判断。
 
 ## 5. 信号定义与量化
 
@@ -216,6 +239,10 @@ IDLE --START--> REMOTE --STOP/断流--> IDLE
 | VA | `SERVO_STATE_A` | `0x210` | J1=0°、J2=225°、J3=270°、J4=0° | `00 00 CA 08 8C 0A 00 00` |
 | VB | `SERVO_STATE_B` | `0x211` | J5=0°、J6=0°、GRIP=90° | `00 00 00 00 84 03 00 00` |
 | VC | `DIAG` | `0x220` | bat=11100 mV、mode=REMOTE、state=0x0003 | `5C 2B 00 00 03 00 01 00` |
+| VD | `ARM_NODE_INFO` | `0x031` | proto=4、hw=1、build=0x1234 | `04 01 34 12 00 00 00 00` |
+| VE | `ARM_DIAG` | `0x221` | fault=0、state=0x0003、mode=REMOTE | `00 00 03 00 01 00 00 00` |
+| VF | `CHASSIS_IMU` | `0x032` | dYaw=+0.123 rad、pitch=−1.50°、roll=+2.50°、evt=impact\|slip、age=4 ms | `7B 00 6A FF FA 00 03 04` |
+| V10 | `ARM_IMU` | `0x222` | gz=−12.34°/s、\|a\|=1450 mg、evt=impact、age=9 ms | 见门禁输出 |
 
 向量里的数值是**原始整数**（raw），物理值 = raw × factor。
 

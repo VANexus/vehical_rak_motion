@@ -54,6 +54,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_serial_session.c
     Core/Src/app_protocol_v2.c
     Core/Src/app_imu.c
+    Core/Src/app_buzz.c
+    Core/Src/app_dbg.c
+    Core/Src/app_bt.c
     Core/Src/app_oled.c
 )
 

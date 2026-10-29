@@ -9,6 +9,7 @@
 #include "app_oled.h"
 #include "app_car.h"
 #include "app_imu.h"
+#include "app_dbg.h"
 #include "main.h"
 #include "stm32f4xx.h"
 #include <stdio.h>
@@ -47,6 +48,7 @@ static void oled_data(uint8_t value) { oled_byte(value, 1); }
 
 static void oled_init(void)
 {
+    BOOT_MARK(8);
     /* [AI] R20 CubeMX 迁移：PD11-14 已由 MX_GPIO_Init 配置为推挽输出
        （gpio.c, OUTPUT_PP），删寄存器版 GPIO 配置块 */
     pin_set(14, 1);
@@ -68,6 +70,7 @@ static void oled_init(void)
     oled_cmd(0xDB); oled_cmd(0x30);
     oled_cmd(0xA4); oled_cmd(0xA6);
     oled_cmd(0xAF);
+    BOOT_MARK(9);
 }
 
 /* 5x7 字库（R4 原版 + [AI] 补 H/I/K/Q/X/Z，其余未列字形=空白） */
@@ -143,6 +146,7 @@ static void display_text(unsigned x, unsigned y, const char *s)
 
 static void oled_flush(void)
 {
+    BOOT_MARK(10);
     for (unsigned page = 0; page < 8; ++page) {
         oled_cmd((uint8_t)(0xB0U + page));
         oled_cmd(0x00); oled_cmd(0x10);
