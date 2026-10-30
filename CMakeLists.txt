@@ -117,16 +117,14 @@ target_compile_definitions(canopen PUBLIC CO_USE_GLOBALS)
 target_compile_options(canopen PRIVATE -w)
 target_link_libraries(canopen PUBLIC stm32cubemx)
 
-option(APP_USE_CANOPEN "Build with CANopen v5 stack (disable to build v4 app_can.c)" ON)
-if(APP_USE_CANOPEN)
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-        Core/Src/app_canopen.c
-        Core/Src/OD.c
-    )
-    target_link_libraries(${CMAKE_PROJECT_NAME} canopen)
-else()
-    target_sources(${CMAKE_PROJECT_NAME} PRIVATE Core/Src/app_can.c)
-endif()
+# [AI] 2026-10-30：v4 已整体删除，协议只允许 v5（CANopen）一套。
+# 原来的 APP_USE_CANOPEN=OFF 回滚开关一并移除——留一个"能编回旧协议"的开关，
+# 就等于留一条永远没人测、却在紧急时会被想起的路。要回滚请回滚 git 提交。
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    Core/Src/app_canopen.c
+    Core/Src/OD.c
+)
+target_link_libraries(${CMAKE_PROJECT_NAME} canopen)
 
 #
 # ---------------------------------------------------------------------------

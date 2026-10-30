@@ -57,14 +57,32 @@
 
 /* Mecanum kinematics: wheel rim speed for body velocity
       v_i = sx*Vx + sy*Vy + sw*(lx+ly)*wz   [mm/s, wz in 0.01 rad/s]
-   converted with counts/ms = mm/s * 61600 / (2*pi*32.5 mm) / 1000.
+   converted with counts/ms = mm/s * 61600 / (2*pi*r) / 1000.
    If a wheel runs the wrong way during test, flip its sign(s) here. */
-/* [AI] R23：以下麦轮估算常数仅保留旧 CAN/台架路径，不作为 v2 标定数据。 */
-#define IK_PERMM_NUM  3017L   /* counts per mm, x10 */
+/* [AI] R74（2026-10-30 架构评审修正）：以下三个常数原先与上位机分叉两处，均已对齐：
+     ① 轮半径：旧注释写 32.5 mm（0.3017 counts/mm），而 2026-10-14 实测为
+        **Ø5.5 cm → r=27.5 mm**（上位机 `wbc_params.yaml`/`node.py` 的 wheel_radius=0.0275）。
+        61600 / (2π×27.5) = 356.5 counts/mm → 因子 0.3565 = 3565/10000。
+        旧值使本板自检行程与 OLED 体速度偏短 18%（301.7/356.5）。
+     ② lx+ly：旧值 150 mm 是台架期估计；上位机 URDF 已实测轴距 0.245 / 轮距 0.275，
+        半和 = **0.26 m = 260 mm**（`chassis_controllers.yaml` sum_of_robot_...=0.26）。
+        旧值使原地转比例错 1.73×。
+     这两处**只影响本板自检与 OLED 体速度**（v5 远程路径下发四轮速令，不经过本 IK），
+     但自检通过与否是台架验收依据，假阳性代价高。
+     一致性由伞形仓 `tools/geometry_gate.py` 守护（比对本文件与上位机 yaml/URDF）。 */
+#define IK_PERMM_NUM  3565L   /* counts per mm, x10 (61600/2πr, r=27.5mm) */
 #define IK_PERMM_DEN 10000L
 
-/* [AI]  R9 陀螺仪自稳定调参（A 板 ICM20948；算法见 stabilizer_apply） */
-#define STAB_ENABLE       1
+/* [AI] R9 陀螺仪自稳定调参（板载 ICM20948/MPU6050；算法见 wheel_control_stabilize）
+   [AI] R74（2026-10-30）：**默认关闭**。原设计让本板用板载 IMU 修正上位机下发的
+   四轮目标（轮域 PD，跟随陀螺仪偏航率），构成一个上位机不可见的闭环；而上位机
+   自己已经在 EKF(LSM6DSRTR) → Nav2 → cmd_vel 上闭了 yaw 环。两个闭环串在同一被控量、
+   用两颗不同 IMU，导致：整定不可复现、`cmd_vel` 与实际轮速不等、文档与代码矛盾
+   （`architecture.md` 声称 MCU 不做航向）。
+   现在：默认 0，运行期可经 `car_set_stab_en()` 打开（台架排障用），
+   状态经 `car_flags()` bit3 上报到 OD `0x2052 car_state`，上位机可观测。
+   航向保持若仍需要，应在 Jetson 侧做独立节点（可进 bag、可让权给 Nav2）。 */
+#define STAB_ENABLE_DEFAULT 0U
 #define STAB_RATE_KP      1.5f   /* 旋转速率误差(°/s) → 修正(0.01rad/s) */
 #define STAB_DAMP_K       1.2f   /* 无旋转指令时的阻尼增益 */
 #define STAB_HEAD_KP      0.6f   /* 航向保持(每度偏差 → 0.01rad/s) */
@@ -96,7 +114,7 @@ static const uint8_t target_turns[MOTOR_COUNT] = {3, 3, 3, 3};  /* equal targets
    stop distance at approach speed is ~6.1-6.7k counts per motor, so
    each trigger sits (coast - 0.005 turn) before the target. */
 static const int32_t brake_lead[MOTOR_COUNT] = {6350, 6420, 5800, 6370};
-static const int32_t ik_lw = 150L;   /* lx+ly in mm (half wheelbase + half track) */
+static const int32_t ik_lw = 260L;   /* [AI] R74: 0.245/0.275 实测 → 半和 260mm（原 150 为估计值） */
 static const int8_t ik_sx[MOTOR_COUNT] = { 1,  1,  1,  1};
 static const int8_t ik_sy[MOTOR_COUNT] = {-1,  1,  1, -1};
 static const int8_t ik_sw[MOTOR_COUNT] = {-1,  1, -1,  1};
@@ -140,7 +158,15 @@ static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 volatile uint8_t car_drive_gate_dbg;   /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-10，协议冻结版） */
 static uint8_t reset_cause;
-const char build_tag[] = "R73";   /* [AI] R73（2026-10-29）：+ 桥接可观测量
+const char build_tag[] = "R75";   /* [AI] R74（2026-10-30，架构评审修正三处，均不动协议/OD）：
+  *   ① 轮域稳定器默认关（`STAB_ENABLE_DEFAULT 0`）+ 运行期 `car_set_stab_en()`
+  *      + `car_flags()` bit3 → OD 0x2052 car_state，上位机可观测。
+  *      原因：它与上位机 EKF/Nav2 的 yaw 环串在同一被控量上，且与文档"MCU 不做航向"矛盾。
+  *   ② 自检/OLED 的麦轮几何对齐实测：轮半径 32.5→27.5 mm（IK_PERMM 3017→3565）、
+  *      lx+ly 150→260 mm。仅影响本板自检与 OLED 体速度（v5 远程走四轮速令）。
+  *   ③ 几何一致性改由伞形仓 `tools/geometry_gate.py` 守护，防再次分叉。
+   *   原 R74（2026-10-30 第二改）：两板加 CAN 静默自愈（SLAK 清除 + 100ms 滞留邮箱 ABRQ）。
+ *   原 R73（2026-10-29）：+ 桥接可观测量
   *   （0x2050 cmd_en / 0x2051 cmd_age_ms / 0x2052 car_state）与设备标识
   *   0x2F00 tag_packed / 0x2F01 reset_cause。
   *   注：CiA 推荐的 0x1008/1009/100A（VISIBLE_STRING）实测触发 HardFault
@@ -167,6 +193,9 @@ volatile uint32_t dbg_isr_last_cycles;
 volatile uint32_t dbg_isr_max_cycles;
 static uint16_t stab_scale = 256U;
 static uint16_t stab_slip_ms;
+/* [AI] R74: 轮域稳定器运行期开关（默认关）。见 STAB_ENABLE_DEFAULT 处说明：
+   默认关 = 上位机的 yaw 闭环是唯一闭环；台架排障可临时打开，状态经 car_flags() bit3 上报。 */
+static volatile uint8_t stab_en = STAB_ENABLE_DEFAULT;
 
 /* ---- PWM + motor drivers (AT8236, proven mapping) ----
    [AI] R20 CubeMX 迁移：TIM1/9/10/11 由 MX_TIMx_Init + MspInit 配置
@@ -653,6 +682,21 @@ static int wheel_stabilize_targets(int32_t target_urad_s[MOTOR_COUNT],
     int32_t yaw_err = 0;
     uint32_t now = HAL_GetTick();
     int32_t deriv = 0;
+
+    /* [AI] R74: 稳定器默认关闭。关闭时仍必须过轮级**等比**饱和（ADR-0007 契约：
+       四轮同乘一个系数，斜走方向不丢），否则超限指令会绕过限幅直接进电机。
+       同时清掉 D 项历史，避免下次打开时用旧误差做微分踢一下。 */
+    if (stab_en == 0U) {
+        stab_prev_valid = 0U;
+        stab_deriv_f = 0;
+        stab_yaw_err_prev = 0;
+        stab_scale = 256U;
+        stab_slip_ms = 0U;
+        dbg_stab_corr = 0;
+        dbg_stab_scale = 256U;
+        return wheel_control_common_saturate(target_urad_s,
+                                             wheel_target_limit_urad_s());
+    }
 
     /* [AI] R46: 航向角速度误差差分 + 1/4 EMA 低通（D 项输入）。
        间隔异常（首次/停顿/时间回绕）时不输出微分并清状态。 */
@@ -1298,11 +1342,30 @@ uint8_t car_can_status(void)
 uint8_t car_reset_cause(void) { return reset_cause; }
 uint8_t car_mt_index(void)    { return mt_index; }
 uint8_t car_active_motor(void){ return (uint8_t)active_motor; }
-uint8_t car_flags(void)       /* bit0=遥控中 bit1=急停锁存 bit2=自检中 */
+uint8_t car_flags(void)       /* bit0=遥控中 bit1=急停锁存 bit2=自检中 bit3=轮域稳定器开 */
 {
     return (uint8_t)((remote_running != 0U ? 1U : 0U) |
                      (estop_latched != 0U ? 2U : 0U) |
-                     (mt_running != 0U ? 4U : 0U));
+                     (mt_running != 0U ? 4U : 0U) |
+                     (stab_en != 0U ? 8U : 0U));
+}
+
+/* [AI] R74: 轮域稳定器开关。默认 0（见 STAB_ENABLE_DEFAULT）。
+   上位机可经 OD `0x2052 car_state` bit3 观测当前是否生效。
+   打开时不改变其它语义：仍是轮域 PD，仍受 max_correction 限幅。 */
+void car_set_stab_en(uint8_t on)
+{
+    stab_en = (on != 0U) ? 1U : 0U;
+    /* 切换时清 D 项与打滑状态，避免用半个周期前的误差做微分踢 */
+    stab_prev_valid = 0U;
+    stab_deriv_f = 0;
+    stab_yaw_err_prev = 0;
+    stab_scale = 256U;
+    stab_slip_ms = 0U;
+}
+uint8_t car_stab_enabled(void)
+{
+    return stab_en;
 }
 void car_wheel_speeds(int32_t *out)   /* counts/ms,四轮 */
 {

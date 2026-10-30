@@ -11,7 +11,6 @@
  * P0 只验证协议栈：OD 暂用 CS301 模板（0x6000 测试对象），
  * P1 起替换为 v5 应用对象（见 docs/superpowers/specs/2026-10-29-can-v5-canopen-design.md）。
  */
-#include "app_can.h"
 #include "app_canopen.h"
 #include "app_car.h"
 #include "app_imu.h"
@@ -52,6 +51,33 @@ void can_rx_task_step(void)
 
 void can_tx_task_step(uint32_t now_ms)
 {
+    /* [AI] A16/R75（2026-10-30）：CAN 静默/睡死自愈 —— 1 kHz 检查，动作在 100 ms 量级。
+     * 台架实录（docs/CAN-BRINGUP-2026-10-30.md §3.2）：臂板曾出现 MSR.SLAK=1
+     * （bxCAN 自己进了 Sleep）+ 三个 TX 邮箱全部滞留，总线上表现为
+     * "SDO/心跳正常但 TPDO 全灭"→ 完全静默。底盘 R51 有 v4 时代的自愈先例；
+     * v5 栈本身没有这层保护，两板暴露在同一风险下。做两件最小的事：
+     *   1) 发现 SLAK=1 → 软件清 SLEEP（bxCAN 退出睡眠只能软件做）；
+     *   2) 三个 TX 邮箱连续 100 ms 全部非空（TME=000）→ 置 ABRQ 丢弃滞留请求，
+     *      让 CANopenNode 下个周期自己重发（与 R51 的"邮箱 ABRQ 自愈"同思路）。
+     * 不碰过滤器/不重初始化——那类动作风险高，这里只处理"静默"这一种已实证的形态。 */
+    static uint16_t s_tx_stuck_ms;
+    if ((CAN1->MSR & CAN_MSR_SLAK) != 0U) {
+        CLEAR_BIT(CAN1->MCR, CAN_MCR_SLEEP);
+        s_tx_stuck_ms = 0U;
+    }
+    if ((CAN1->TSR & (CAN_TSR_TME0 | CAN_TSR_TME1 | CAN_TSR_TME2)) == 0U) {
+        if (s_tx_stuck_ms < 0xFFFFU) {
+            s_tx_stuck_ms++;
+        }
+        if (s_tx_stuck_ms >= 100U) {
+            SET_BIT(CAN1->TSR,
+                    CAN_TSR_ABRQ0 | CAN_TSR_ABRQ1 | CAN_TSR_ABRQ2);
+            s_tx_stuck_ms = 0U;
+        }
+    } else {
+        s_tx_stuck_ms = 0U;
+    }
+
     (void)now_ms;
     canopen_app_interrupt();
 }
@@ -68,9 +94,6 @@ uint8_t crc8(const uint8_t *p, uint8_t n, uint8_t init)
     return crc;
 }
 
-uint8_t can_arm_seen(void)       { return 0U; }
-uint32_t can_arm_last_ms(void)   { return 0U; }
-int16_t can_arm_fault_code(void) { return 0; }
 
 /* ======================= P1 应用桥接 ======================= */
 
@@ -127,6 +150,16 @@ void app_canopen_step(uint32_t now_ms)
         w[2] = (int32_t)OD_RAM.x2002_W3spd * 10000;
         w[3] = (int32_t)OD_RAM.x2003_W4spd * 10000;
     }
+
+    /* [AI] R74：`0x2041 cmd_flags` bit1 = 轮域陀螺稳定器开关（默认 0，架构评审修正）。
+       它不是协议新对象（cmd_flags 已是 U16），所以不需重生成 EDS/OD，门禁不受影响。
+       只在 Operational 时接受：Pre-operational 期间的残留值不允许打开这个隐藏内环。
+       语义与风险见 `docs/CANOPEN-V5.md` §5 与 app_car.c 的 STAB_ENABLE_DEFAULT 注释。 */
+    if (node_operational() != 0U) {
+        uint8_t want = (uint8_t)((OD_RAM.x2041_cmd_flags & 0x0002U) != 0U);
+        if (want != car_stab_enabled()) car_set_stab_en(want);
+    }
+
     car_wheel_command_urad(w, enable, now_ms);
 
     /* 桥接状态对外可见（SDO 0x2050..0x2053，不占 PDO 带宽） */

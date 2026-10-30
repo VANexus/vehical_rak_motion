@@ -29,7 +29,7 @@
 #include "app_buzz.h"   /* [AI] R66 */
 #include "app_bt.h"      /* [AI] R67 */
 #include "app_car.h"
-#include "app_can.h"
+#include "app_canopen.h"
 #include "app_canopen.h"
 #include "app_oled.h"
 /* USER CODE END Includes */

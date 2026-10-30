@@ -1,5 +1,12 @@
 # AGENTS.md — 本仓工作约束（底盘 MCU 固件）
 
+> ⚠️ **v4 已于 2026-10-30 整体下线。** 本文中所有对 `docs/PROTOCOL.md`、`docs/protocol-signals.yaml`、
+> `tools/can_check.py`、`docs/gen/can_protocol.h`、`APP_USE_CANOPEN` 的引用**全部作废**——
+> 这些文件已删除，固件里没有 v4 分支。协议唯一规范是 [`docs/CANOPEN-V5.md`](CANOPEN-V5.md)（README 同目录），
+> 门禁是 `python3 tools/canopen_gate.py --repo .`。历史说明保留原文只为追溯，**不要照着执行**。
+
+
+
 > **CAN 协议已于 2026-10-29 切到 v5（CANopen）** —— 规范件 `docs/CANOPEN-V5.md`，
 > 门禁 `python3 tools/canopen_gate.py`，台架验收 `python3 tools/canopen_bringup.py`。
 > 本文里凡提到 `can_check.py` / `protocol-signals.yaml` / `PROTOCOL.md`(v4) / `can_protocol.h`
@@ -40,17 +47,17 @@ pure 底盘（4 轮闭环 + IMU + CAN）——见 `README.md` §0 与 [`docs/KNO
 cmake --preset Debug   && cmake --build --preset Debug     # 还要跑 Release
 cmake --preset Release && cmake --build --preset Release
 STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_motion.hex -v -rst
-python3 tools/can_check.py            # 动了协议就必须通过（退出码 0）；需要 PyYAML
-python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段
-python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手改）
+python3 tools/canopen_gate.py --repo .  # 动了协议/OD 就必须通过（退出码 0）
+python3 tools/canopen/gen_eds.py docs/canopen/<node>.json tools/canopen/template.eds docs/canopen/<node>.eds
+python3 tools/canopen_bringup.py --can can0 --seconds 3   # 台架：NMT/SYNC/PDO 速率/SDO
 bash tools/cubemx_lint.sh             # 动了 .ioc / 外设就必须通过（退出码 0）；见 docs/CUBEMX-SOP.md
 ```
 
 - **每条命令都要在同一个 shell 里先 source `env/activate.sh`**——它只改当前 shell 的 PATH，不落盘；分开执行会报 `arm-none-eabi-gcc not found`。
-- 若 activate 报「没找到 STM32CubeCLT」，说明本机没装工具链：构建/烧录**无从验证，别声称构建通过**；此时唯一能跑的门禁是 `python3 tools/can_check.py`。
-- 本仓**没有单元测试框架**；两个自动化门禁：`can_check.py`（协议）与 `cubemx_lint.sh`（外设配置越界）。动了协议必须跑前者，动了 `.ioc` / 外设必须跑后者。
+- 若 activate 报「没找到 STM32CubeCLT」，说明本机没装工具链：构建/烧录**无从验证，别声称构建通过**；此时唯一能跑的门禁是 `python3 tools/canopen_gate.py --repo .`（纯 Python）。
+- 本仓**没有单元测试框架**；两个自动化门禁：`canopen_gate.py`（协议/OD）与 `cubemx_lint.sh`（外设配置越界）。动了协议必须跑前者，动了 `.ioc` / 外设必须跑后者。
 - `docs/gen/can_protocol.h` 目前**没有任何固件源文件 include**（`app_can.c` 自带编解码）——重新生成它不会改变固件行为。
 - 新 `.c/.h` 加进**顶层** `CMakeLists.txt`（`cmake/stm32cubemx/` 那份会被 CubeMX 覆盖）；只往 `USER CODE BEGIN/END` 标记对之间写。
 - CubeMX 重生成后必查（完整清单见 `docs/CUBEMX-SOP.md` §三第 3 步）：`stm32f4xx_it.c` 不得恢复 SVC/PendSV/SysTick 三个 handler；`SystemClock_Config` 的 HSE 设置是否被抹回 HSI；**`main.c` 的 `USER CODE BEGIN 2` 是否排在所有外设 `MX_*_Init()` 之后**；`.ioc` 里启用的每个外设是否都有对应的 `MX_*_Init()`（R20 就漏过 TIM2/TIM5/USART3）。`bash tools/cubemx_lint.sh` 覆盖了其中大部分。
-- 提交前：Debug + Release 零警告 + `can_check.py` 通过（动了协议）+ `cubemx_lint.sh` 通过（动了外设）。开工先 `git pull`，收工就 push。
+- 提交前：Debug + Release 零警告 + `canopen_gate.py` 通过（动了协议）+ `cubemx_lint.sh` 通过（动了外设）。开工先 `git pull`，收工就 push。
 - 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_edge_ai` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。
