@@ -1,0 +1,73 @@
+name: build
+
+# 固件构建门禁。**必须跑在装了 STM32CubeCLT 1.22.0 的 self-hosted runner 上**：
+# AGENTS §2 规定工具链只有一套（GCC 14.3.rel1），换成发行版 gcc 会失去
+# ".bin/.hex 跨端逐字节一致" 这个性质，跨端指纹就失效了。
+#
+# Runner 标签：self-hosted, linux, stm32
+# 环境变量：CUBECLT=/opt/st/stm32cubeclt_1.22.0（或直接改下面的 activate 路径）
+#
+# 判据（AGENTS §6）：Debug 与 Release **双双通过且零警告**。零警告是硬要求，
+# 不是"尽量"——上一轮的幽灵 bug 有一半是警告被忽略堆出来的。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Debug + Release（零警告）
+    runs-on: [self-hosted, linux, stm32]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链自检（先证明是那一套，再谈编译不过）
+        run: |
+          . ./env/activate.sh
+          arm-none-eabi-gcc --version | head -1
+          cmake --version | head -1
+          ninja --version
+
+      - name: Debug
+        run: |
+          . ./env/activate.sh
+          cmake --preset Debug
+          cmake --build --preset Debug 2>&1 | tee /tmp/build-debug.log
+          if grep -qE '\bwarning:|\berror:' /tmp/build-debug.log; then
+            echo "::error::Debug 有警告或错误（AGENTS §6 要求零警告）"
+            grep -E '\bwarning:|\berror:' /tmp/build-debug.log | head -20
+            exit 1
+          fi
+
+      - name: Release
+        run: |
+          . ./env/activate.sh
+          cmake --preset Release
+          cmake --build --preset Release 2>&1 | tee /tmp/build-release.log
+          if grep -qE '\bwarning:|\berror:' /tmp/build-release.log; then
+            echo "::error::Release 有警告或错误（AGENTS §6 要求零警告）"
+            grep -E '\bwarning:|\berror:' /tmp/build-release.log | head -20
+            exit 1
+          fi
+
+      - name: 指纹与体积（可跨端比对的是 .bin/.hex，不是 .elf）
+        run: |
+          echo "### 构建指纹" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sha256sum build/Debug/*.bin build/Release/*.bin || true
+          arm-none-eabi-size build/Debug/*.elf build/Release/*.elf || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: 协议门禁（改了 OD/EDS 必须同批一致）
+        run: |
+          python3 tools/canopen_gate.py --repo . || {
+            echo "::error::canopen_gate 未通过：清单 ↔ EDS ↔ OD.c/h 不一致"
+            exit 1
+          }

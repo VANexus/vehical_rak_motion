@@ -49,7 +49,7 @@
 | 用户按键 | PE0 | 低有效，[AI] R48 起为 EXTI 双沿中断（GPXTI0 + 上拉，EXTI0 优先级 7），消抖仍在 100 Hz 任务 |
 | LED | PE8 | 低亮 |
 | 蜂鸣器 | PA8 | 需插跳线帽 |
-| OLED 128×64 SSD1306 | PD11=DC、PD12=RES、PD13=DATA、PD14=CLK | 软 SPI |
+| OLED 128×64 SSD1306 | PD11=DC、PD12=RES、PD13=DATA、PD14=CLK | 软 SPI；**这四脚必须配成推挽输出**（开漏无上拉拉不高，屏实测全黑——2026-10-29 R70/A11 修复） |
 | 使能开关 | PD3 | 输入 |
 | **板载 IMU ICM20948** | **PB10 / PB11** | 软 I2C（PB10=SCL、PB11=SDA，开漏+外部上拉）。[AI] R46 澄清：早期文档写的"PB12 外部中断"**未启用**——.ioc 无 PB12，固件用 100 Hz 轮询（`imu_update`），PB12 非本驱动依赖 |
 | 电池电压 ADC | PB0（ADC1_IN8） | 100k:10k 分压，`mV = raw × 3300 × 11 / 4095` |

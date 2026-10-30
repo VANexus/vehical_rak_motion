@@ -1,5 +1,53 @@
 # vehical_rak_motion — 底盘板固件（STM32F407VET6 / C30D）
 
+## CANopen v5（当前生效的通信栈）
+
+- 规范件：`docs/CANOPEN-V5.md`；设计与实测进度：`docs/CANOPEN-V5-DESIGN.md`（同步自伞形 `docs/superpowers/specs/`）。
+- 现成栈：`third_party/canopen/CANopenNode`（v4，含 CiA 304 SRDO）+ `CANopenNode_STM32`（官方 HAL 移植层），Apache-2.0；
+  对上游的 4 处改动与原因见 `third_party/canopen/PATCHES.md`（**改上游必须记**）。
+- 节点：本仓 **node 1**（底盘板）；另一块板 node 2，Jetson = NMT 主站 node 127。SYNC 2 ms。
+- 对象清单（单一来源）：`docs/canopen/chassis.json` → `docs/canopen/chassis.eds` → `Core/Inc/OD.h` + `Core/Src/OD.c`。
+
+### 改了对象/PDO 之后怎么重生成（不要手改 OD.c/OD.h）
+
+```bash
+python3 tools/canopen/gen_eds.py docs/canopen/chassis.json tools/canopen/template.eds docs/canopen/chassis.eds
+# 官方 CANopenEditor CLI（需 .NET；本机用 dotnet-sdk-10.0 + DOTNET_ROLL_FORWARD=Major 跑 net8.0）
+dotnet <CANopenEditor>/EDSSharp/bin/Release/net8.0/EDSSharp.dll \
+       --infile docs/canopen/chassis.eds --outfile OD.c --type CanOpenNodeV4
+cp OD.c Core/Src/OD.c; cp OD.h Core/Inc/OD.h
+```
+
+### 门禁与台架验收
+
+```bash
+python3 tools/canopen_gate.py --repo .        # 清单↔EDS↔OD 一致、ODList 升序、PDO 禁用位
+python3 tools/canopen_bringup.py --can can0 --seconds 3 --no-drive   # NMT/SYNC/PDO 速率/SDO
+```
+
+- 心跳应为 `0x701`：上电 `7F`（Pre-operational）→ 主站 NMT Start 后 `05`。
+- TPDO 期望速率：`0x181/0x281/0x381/0x481` 各 100 Hz。
+- 桥接可观测量（SDO）：`0x2050 cmd_en`、`0x2051 cmd_age_ms`、`0x2052 car_state`、`0x2053 car_mode`。身份：`0x2F00`（build_tag 前 4 字符小端打包）、`0x2F01`（复位原因）。
+- ⚠️ 三个已知坑（未用 PDO 的 COB-ID bit31、RX 过滤器遍历方向、EDS 段落顺序决定 ODList 顺序）
+  已固化在 `gen_eds.py` / `PATCHES.md` / `CANOPEN-V5.md` §7 里，别绕过生成器手改。
+
+### v4 已删除（2026-10-30）
+
+`Core/Src/app_can.c`、`Core/Inc/app_can.h`、`docs/PROTOCOL.md`、`docs/protocol-signals.yaml`、
+`tools/can_check.py` 与 `APP_USE_CANOPEN` 编译开关**全部移除**。本仓只编 CANopen v5，
+没有"编回旧协议"的分支——要回滚请回滚 git 提交。
+`app_canopen.h` 里保留了 `can_init` / `can_rx_task_step` / `can_tx_task_step` / `crc8` 四个
+**历史接口名**，只为让 `main.c` / `freertos.c` 的调用点不必改写，语义已全部是 CANopen。
+
+
+> **CAN 协议已于 2026-10-29 切到 v5（CANopen）** —— 规范件 `docs/CANOPEN-V5.md`，
+> 门禁 `python3 tools/canopen_gate.py`，台架验收 `python3 tools/canopen_bringup.py`。
+> 本文里若仍出现 `can_check.py` / `protocol-signals.yaml` / `PROTOCOL.md` / `can_protocol.h`，
+> 指的是**已删除的历史文件**（2026-10-30 v4 下线），不是可选路径。协议只允许 v5。
+> 当前在板 build_tag：底盘 **R73** / 机械臂 **A14**；Jetson `rak` 侧仍是 v4 主站，
+> 与 v5 板子不兼容，联调暂用上面的 `canopen_bringup.py`（生产主站 = 待办 P3）。
+
+
 **四轮麦轮底盘**：四路 AT8236 电机驱动 + 四路正交编码器 + SSD1306 OLED + 板载 IMU，
 四轮 **25 kHz 硬实时速度闭环**，由 Jetson 上位机经 **CAN v4 @1 Mbps** 控制。
 
@@ -9,8 +57,7 @@
 > 姊妹仓 = `vehical_rak_edge_ai`（**机械臂板**，同硬件、不同角色）；上位机 = `VANexus/rak`（Jetson）。
 
 条款与操作流程看本仓 [`AGENTS.md`](AGENTS.md) 与 [`CLAUDE.md`](CLAUDE.md)；
-协议看 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)（规范件）+
-[`docs/protocol-signals.yaml`](docs/protocol-signals.yaml)（机器可读单一来源）；
+协议看 [`docs/CANOPEN-V5.md`](docs/CANOPEN-V5.md)（唯一规范件）；
 板级真相看 [`docs/BOARD-C30D.md`](docs/BOARD-C30D.md)。**新成员先读 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)**。
 
 ---
@@ -34,14 +81,14 @@
 
 ---
 
-## 1. 当前状态：R64（底盘板，双板架构）
+## 1. 当前状态：R74（底盘板，双板架构）
 
 | 项 | 状态 |
 | --- | --- |
 | CubeMX 生成 | ✅ FW_F4 V1.28.3，TargetToolchain=CMake；HSE 8 MHz 时钟树 + TIM7 时基；外设均在 `MX_*_Init()`（R20 起不再手写寄存器） |
 | Debug / Release 构建 | ✅ 双预设零警告 |
-| 应用代码 | ✅ R64：4 轮 25 kHz 闭环 + 四路编码器 + IMU IIR + CAN v4 主链路 + OLED + ADC 电池 + IWDG；**R64 删舵机**（`app_servo`）、删 `0x110/111` 消费与 `0x210/211` 上行 |
-| 上板运行 | ✅ 历史版本已上板（R5/R49-R57 烟测记录见附录）；**R64 待上板复测** |
+| 应用代码 | ✅ R74：4 轮 25 kHz 闭环 + 四路编码器 + IMU IIR + **CANopen v5 主链路（唯一）** + OLED + ADC 电池 + IWDG；**R74 = 轮域稳定器默认关 + 自检几何对齐实测 + v4 代码删除** |
+| 上板运行 | ✅ 历史版本已上板（R5/R73 烟测记录见附录）；**R74 待上板复测**（本次只做了双预设零警告构建） |
 | CAN 物理联调 | ⏳ 与机械臂板 / Jetson 三节点联调待做（2026-10-29 起） |
 | ⚠️ 已知问题 | **左前轮 `allow_motion=true` 后自转不停**（GitHub issue [#8](https://github.com/VANexus/rak/issues/8)）——见 [`docs/KNOWN-ISSUE-runaway-wheel.md`](docs/KNOWN-ISSUE-runaway-wheel.md) |
 
@@ -94,19 +141,20 @@ cmake --preset Release && cmake --build --preset Release
 STM32_Programmer_CLI -c port=SWD mode=UR freq=100 -w build/Debug/vehical_rak_motion.hex -v -rst
 ```
 
-提交前本仓必须过：`python3 tools/can_check.py`（动了协议）+ `cmake --build --preset Debug/Release`（零警告）
+提交前本仓必须过：`python3 tools/canopen_gate.py --repo .`（动了协议/OD）+ `cmake --build --preset Debug/Release`（零警告）
 + `bash tools/cubemx_lint.sh`（动了外设）。**跨端比对用 `.bin`/`.hex` 的 SHA-256**，不要比 `.elf`。
 
 ---
 
 ## 4. 通信协议
 
-**CAN v4 是唯一主链路**（规范 [`docs/PROTOCOL.md`](docs/PROTOCOL.md)，内容 FROZEN）。
-`0x010 SAFETY_CMD` 是广播 e2e 帧：急停（cmd=4）在 ISR 快速路径锁存；清除（cmd=5）经安全门落地。
-`0x100 DRIVE_CMD` 断流 100 ms → 目标清零 + `STATE.bit3`。
+**CANopen v5 是唯一实现**（规范 [`docs/CANOPEN-V5.md`](docs/CANOPEN-V5.md)）。
+本板 = **node 1**：RPDO `0x201` 四轮速令（`0x2000..0x2003`，INT16 0.01 rad/s）、
+RPDO `0x301` `cmd_seq`+`cmd_flags`；TPDO `0x181/0x281/0x381/0x481`（轮速/轮位/IMU）。
+deadman：`cmd_seq` 100 ms 内必变 + `cmd_flags.bit0=1` + Operational，缺一则 `enable=0`。
 
-**不要自己手写帧表**：`python3 tools/can_check.py --c-header` 生成 `docs/gen/can_protocol.h`；
-提代码前 `can_check.py` 必须退出码 0。
+**不要自己手写对象表**：改 `docs/canopen/chassis.json` → `gen_eds.py` → `.eds` → 官方导出器 → `OD.c/h`；
+提代码前 `python3 tools/canopen_gate.py --repo .` 必须退出码 0。
 
 ---
 

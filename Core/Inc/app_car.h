@@ -62,7 +62,13 @@ uint8_t car_can_status(void);
 uint8_t car_reset_cause(void);   /* 'B'/'I'/'S'/'P'/'-' */
 uint8_t car_mt_index(void);      /* 自检序列当前步 */
 uint8_t car_active_motor(void);  /* FAULT 时的电机号 */
-uint8_t car_flags(void);         /* bit0=遥控中 bit1=急停锁存 bit2=自检中 */
+uint8_t car_flags(void);         /* bit0=遥控中 bit1=急停锁存 bit2=自检中 bit3=轮域稳定器开 */
+/* [AI] R74（2026-10-30）：轮域陀螺稳定器运行期开关。
+   默认 0 = 关：上位机的 EKF/Nav2 yaw 闭环是唯一闭环，本板不叠加隐藏内环。
+   台架排障可临时置 1；当前状态经 car_flags() bit3 → OD 0x2052 上报。
+   航向保持若需要，应在 Jetson 侧做独立节点，而不是在这里做不可观测的修正。 */
+void car_set_stab_en(uint8_t on);
+uint8_t car_stab_enabled(void);
 void car_wheel_speeds(int32_t *out);  /* counts/ms,四轮快照 */
 void car_wheel_positions(int32_t *out); /* [AI] R45: 累计位置 counts,四轮(CAN WHEEL_POS) */
 uint8_t car_control_ready(void);      /* [AI]  R16: 1=25kHz 已启动(BOOTING 结束) */

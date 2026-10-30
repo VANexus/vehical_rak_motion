@@ -1,5 +1,12 @@
 # 快速上手（底盘固件仓）
 
+> ⚠️ **v4 已于 2026-10-30 整体下线。** 本文中所有对 `docs/PROTOCOL.md`、`docs/protocol-signals.yaml`、
+> `tools/can_check.py`、`docs/gen/can_protocol.h`、`APP_USE_CANOPEN` 的引用**全部作废**——
+> 这些文件已删除，固件里没有 v4 分支。协议唯一规范是 [`docs/CANOPEN-V5.md`](CANOPEN-V5.md)（README 同目录），
+> 门禁是 `python3 tools/canopen_gate.py --repo .`。历史说明保留原文只为追溯，**不要照着执行**。
+
+
+
 面向新加入的成员（Windows 或 Linux）。目标：**20 分钟内从 clone 到板上看到自己的固件版本号**。
 
 ---

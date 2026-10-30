@@ -1,5 +1,20 @@
 # CLAUDE.md
 
+> ⚠️ **v4 已于 2026-10-30 整体下线。** 本文中所有对 `docs/PROTOCOL.md`、`docs/protocol-signals.yaml`、
+> `tools/can_check.py`、`docs/gen/can_protocol.h`、`APP_USE_CANOPEN` 的引用**全部作废**——
+> 这些文件已删除，固件里没有 v4 分支。协议唯一规范是 [`docs/CANOPEN-V5.md`](CANOPEN-V5.md)（README 同目录），
+> 门禁是 `python3 tools/canopen_gate.py --repo .`。历史说明保留原文只为追溯，**不要照着执行**。
+
+
+
+> **CAN 协议已于 2026-10-29 切到 v5（CANopen）** —— 规范件 `docs/CANOPEN-V5.md`，
+> 门禁 `python3 tools/canopen_gate.py`，台架验收 `python3 tools/canopen_bringup.py`。
+> 本文里凡提到 `can_check.py` / `protocol-signals.yaml` / `PROTOCOL.md`(v4) / `can_protocol.h`
+> 的条目**只适用于 v4 回滚分支**（`cmake -DAPP_USE_CANOPEN=OFF`）。
+> 当前在板 build_tag：底盘 **R73** / 机械臂 **A14**；Jetson `rak` 侧仍是 v4 主站，
+> 与 v5 板子不兼容，联调暂用上面的 `canopen_bringup.py`（生产主站 = 待办 P3）。
+
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 先读
@@ -25,8 +40,8 @@ STM32_Programmer_CLI -c port=SWD mode=UR freq=100 \
     -w build/Debug/vehical_rak_motion.hex -v -rst
 
 python3 tools/can_check.py            # 协议门禁：结构校验 + 向量比对 + CRC 负例，退出码 0 才算过
-python3 tools/can_check.py --update   # 协议改动后回写 YAML 的 expect 字段
-python3 tools/can_check.py --c-header # 生成 docs/gen/can_protocol.h（勿手改）
+python3 tools/canopen/gen_eds.py docs/canopen/<node>.json tools/canopen/template.eds docs/canopen/<node>.eds
+python3 tools/canopen_bringup.py --can can0 --seconds 3   # 台架：NMT/SYNC/PDO 速率/SDO
 
 bash tools/cubemx_lint.sh             # 外设配置门禁：应用层出现寄存器级外设初始化就报错（见 docs/CUBEMX-SOP.md）
 ```
