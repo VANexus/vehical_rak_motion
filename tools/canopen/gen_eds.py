@@ -245,7 +245,9 @@ def main():
                       str(int(tpdo_types.get(name, 254))))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(dump_eds(sort_object_sections(sections)))
+    # [AI] A31（同臂板批次）：强制 LF——text 模式在 Windows 上写出 CRLF，与
+    # .gitattributes 的 LF 规范冲突，会让 canopen_gate 的逐字比对假失败。
+    out_path.write_text(dump_eds(sort_object_sections(sections)), newline="\n")
     print(f"[gen_eds] {manifest['node']}: {len(objs)} app objects -> {out_path}")
     return 0
 
