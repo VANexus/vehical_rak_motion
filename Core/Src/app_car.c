@@ -43,8 +43,13 @@
                                  four so static friction cannot stagger
                                  the start (raise to 80 if one lags) */
 #define SPEED_RAMP_STEP  8L   /* counts/ms of slew per ms */
-#define SPEED_KP_DIV     2L   /* duty_q += err / 2           (P) */
-#define SPEED_KI_DIV     4L   /* duty_q += err / 4 per 1 ms  (I) */
+/* [AI] R76: P/I 增益改为 Q8 域——误差先 ×256（counts/ms 的 Q8）再除
+   SPEED_KP_DIV<<8 / SPEED_KI_DIV<<8，与旧增益严格等价（e/2+e/4），
+   但积分器状态本身升为 Q8（0.01%×256）：亚 LSB 误差不再被整型截断
+   冻结（旧实现 e=1 时 e/2+e/4=0，积分死区——低速台阶化的成因之一，
+   见 rak/docs/chassis-control-design.md §6.2）。 */
+#define SPEED_KP_DIV     2L   /* duty_q8 += err_q8 / 512          (P) */
+#define SPEED_KI_DIV     4L   /* duty_q8 += err_q8 / 1024 per 1 ms (I) */
 #define V_CMD_LIMIT    350L   /* counts/ms safety clamp */
 #define RC_TIMEOUT_MS  100U   /* Jetson deadman (design: 100 ms) */
 
@@ -94,6 +99,24 @@
 #define SLIP_SCALE_STEP    2U
 #define SLIP_RECOVER_STEP  4U
 
+/* [AI] R76: 低速 1/T 混合测速 + 静摩擦前馈（rak/docs/chassis-control-design.md §6）。
+   台架实测：慢轮 1.9 counts/ms 时 M 法 1 count 量化占读数 52%，反馈台阶化 +
+   静摩擦 → stick-slip 极限环（82% 样本平坦）。三条修法：
+   ① 1/T：counts/ms 低于 SPD_1T_THRESH_LO 时切测周期法——25 kHz ISR 逐拍
+     读编码器，delta≠0 即观测到边沿，用 DWT 计边沿间隔，分辨率从"1 count"
+     变"40 µs"（0.2 rad/s 下误差 52%→<0.1%）；高速回 M 法（1/T 高速溢出/噪）。
+   ② 积分亚 LSB：积分器状态 Q8 化（见 SPEED_KP_DIV 注释）。
+   ③ 静摩擦前馈：目标非零而反馈≈0（"堵"相位）按指令符号补固定占空比，
+     轮起动后 8 ms 内滑出（防突然撤除造成反粘滞极限环）。 */
+#define SPD_1T_THRESH_LO    8L    /* M 法 |counts/ms| 低于此 → 切 1/T（§6 建议 8） */
+#define SPD_1T_THRESH_HI   12L    /* 1/T 高于此 → 回 M 法（迟滞防抖动切换） */
+#define SPD_1T_ZERO_TICKS 125U    /* 5 ms 无边沿 → 1/T 速度判 0 */
+#define SPD_1T_DT_CAP_MS   25U    /* 边沿间隔 >25ms 视作静止起步（防 DWT 回绕尖峰） */
+#define FF_BREAKAWAY_DUTY 7500    /* 0.01% —— 静摩擦起步占空比 ~75%：
+                                     car2 归档转述值（AGENTS §4：待复测），
+                                     与 KICK_DUTY=75 同源；台架首测项 */
+#define FF_STUCK_EPS_Q8    256    /* |反馈| < 1 counts/ms（Q8）视作"堵"相位 */
+
 enum { MOTOR_COUNT = WHEEL_COUNT };
 enum run_mode { IDLE, RUNNING, DONE, STOPPED, FAULT, CALIBRATING, CALIB_DONE };
 enum motor_phase { MOTOR_DRIVE, MOTOR_BRAKE, MOTOR_DONE };
@@ -125,13 +148,23 @@ static uint32_t previous_count[MOTOR_COUNT];           /* ISR-owned */
 static volatile int8_t encoder_sign[MOTOR_COUNT];
 /* [AI] R38: 预载极性被矛盾自检纠正时置位，触发重新落盘（任务态读写） */
 static volatile uint8_t sign_store_dirty;
-static volatile int32_t duty_q[MOTOR_COUNT];           /* 0.01 %, ISR PI state */
+static volatile int32_t duty_q8[MOTOR_COUNT];          /* [AI] R76: 0.01 %×256 (Q8)，ISR PI 状态（原 duty_q） */
+static volatile int32_t ff_q8[MOTOR_COUNT];            /* [AI] R76: 静摩擦前馈，0.01 %×256 */
 static struct motor_state motors[MOTOR_COUNT];
 /* 25 kHz control ISR state */
 static volatile int32_t win_sum[MOTOR_COUNT];          /* counts, 1 ms window */
 static volatile int32_t win_raw[MOTOR_COUNT];          /* [AI] R33: 未归一 1ms 窗增量（判向用，ISR 单写者） */
 static volatile uint32_t win_cnt;
-static volatile int32_t wheel_speed[MOTOR_COUNT];      /* counts/ms, signed */
+static volatile int32_t wheel_speed[MOTOR_COUNT];      /* counts/ms, signed（四舍五入后的混合估计，遥测/阈值兼容用） */
+/* [AI] R76: PI 反馈 = wheel_speed_q8（M/1T 混合估计的 Q8 counts/ms）。
+   高速档 = M 法 sum×256；低速档 = 1/T 边沿间隔换算。wheel_speed 保留为
+   其四舍五入整数视图，供 coast_stop/still 判定/遥测等旧阈值继续使用。 */
+static volatile int32_t wheel_speed_q8[MOTOR_COUNT];
+static volatile int32_t spd1t_raw_q8[MOTOR_COUNT];     /* [AI] R76: 1/T 速度（未归一，×encoder_sign 后用） */
+static volatile uint32_t edge_t[MOTOR_COUNT];          /* [AI] R76: 上次非零增量观测的 DWT 时刻 */
+static volatile uint16_t since_edge[MOTOR_COUNT];      /* [AI] R76: 距上次非零增量的 40µs 拍数 */
+static volatile uint8_t  use_1t[MOTOR_COUNT];          /* [AI] R76: 1=低速档（1/T） */
+static uint32_t cyc_per_ms;                            /* [AI] R76: SystemCoreClock/1000，ISR 启动时固定 */
 /* [AI] R39: 遥测 EMA 滤波值，Q8 定点（256×counts/ms）——M-method ±1 count/ms
  * 量化噪声 (≈±0.10 rad/s) 压到 1/4 以下；PI 快环仍用原始 wheel_speed 不加滞后。
  * Q8 避免整型 EMA 的截断死区（第一版 (raw-filt)>>4 在 |差|<16 时冻结——实测）。 */
@@ -158,7 +191,20 @@ static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 volatile uint8_t car_drive_gate_dbg;   /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-10，协议冻结版） */
 static uint8_t reset_cause;
-const char build_tag[] = "R75";   /* [AI] R74（2026-10-30，架构评审修正三处，均不动协议/OD）：
+const char build_tag[] = "R76";   /* [AI] R76（2026-10-30，低速质量批，rak TODO R76 三项，均不动协议/OD）：
+  *   ① F12 丢拍计数器 dbg_isr_overrun_cnt（SWD 直读）——AGENTS §3"不丢拍"硬性判据
+  *      （TIM6 回调退出时 UIF 残留即计数）。
+  *   ② 低速 1/T 混合测速（|counts/ms|<8 切边沿间隔法，40µs 分辨率，迟滞 12 回 M）
+  *      + 积分亚 LSB 化（duty_q8：0.01%×256，增益严格等价 e/2+e/4）+ 静摩擦前馈
+  *      ff_q8（堵相位按符号补 FF_BREAKAWAY_DUTY=75%，car2 转述值待复测——台架首测项）。
+  *      修编队慢轮 stick-slip（82% 平坦样本），见 rak/docs/chassis-control-design.md §6。
+  *   ③ pitch/roll 竖装（+Y 朝上）轴旋转修复（app_imu.c：水平系旋转 + atan2，
+  *      替换芯片-Z-朝上小角近似——竖装时 az≈0 比值爆炸即实测 ±163°）。
+  *      符号待现场核对；确认前 Jetson 不消费 0x2031/0x2032。
+  *   行为兼容性：wheel_speed 改为混合估计的四舍五入视图（高速段与旧值一致）；
+  *      0x2010..13 速度通道语义不变。
+  *   R75（2026-10-30）：CAN 静默自愈（SLAK 清除 + 100ms 滞留邮箱 ABRQ）。
+  *   R74（2026-10-30，架构评审修正三处，均不动协议/OD）：
   *   ① 轮域稳定器默认关（`STAB_ENABLE_DEFAULT 0`）+ 运行期 `car_set_stab_en()`
   *      + `car_flags()` bit3 → OD 0x2052 car_state，上位机可观测。
   *      原因：它与上位机 EKF/Nav2 的 yaw 环串在同一被控量上，且与文档"MCU 不做航向"矛盾。
@@ -191,6 +237,12 @@ volatile uint8_t  dbg_slip;
    max 是上电以来的高水位，last 是最近一拍。写 max=0 可清零重测。 */
 volatile uint32_t dbg_isr_last_cycles;
 volatile uint32_t dbg_isr_max_cycles;
+/* [AI] R76 F12: 丢拍计数器（CAN-BRINGUP-2026-10-30 §6.1 / AGENTS §3"不丢拍"判据）。
+   回调退出时 TIM6 UIF 若已再次置位 = 本拍没在周期内干完（下一拍被推迟或
+   错过）。只增不减、上电清零、SWD 直读（arm-none-eabi-nm <elf> | grep dbg）；
+   与 dbg_isr_last/max_cycles 配合区分"占空高"与"真丢拍"——AGENTS §3 双统计
+   口径的硬性一半。 */
+volatile uint32_t dbg_isr_overrun_cnt;
 static uint16_t stab_scale = 256U;
 static uint16_t stab_slip_ms;
 /* [AI] R74: 轮域稳定器运行期开关（默认关）。见 STAB_ENABLE_DEFAULT 处说明：
@@ -352,7 +404,7 @@ static uint32_t battery_read_mv(void)
 /* ---- control (C2 motor base + four-wheel speed balancing) ---- */
 
 /* [AI]  25kHz ISR 独占状态（previous_count / position_counts / win_sum /
-   duty_q / v_ramp / wheel_speed / encoder_sign 及 motors[].phase）的原子改写。
+   duty_q8 / v_ramp / wheel_speed / encoder_sign 及 motors[].phase）的原子改写。
    ⚠️ 必须用这一对，不能用 taskENTER_CRITICAL()：TIM6 ISR 优先级 2 高于
    FreeRTOS 的 configMAX_SYSCALL_INTERRUPT_PRIORITY(=5)，而 taskENTER_CRITICAL()
    只是把 BASEPRI 抬到 5 —— 优先级数值 <5 的中断根本不受它屏蔽，
@@ -385,10 +437,15 @@ static void reset_positions(void)
          * R30 曾用标定表预设 encoder_sign，与闭环内部约定不一致，
          * 导致 FL/RR 闭环正反馈飞车——标定表只提供 CPR/半径/杠杆换算。 */
         encoder_sign[i] = 0;
-        duty_q[i] = 0;
+        duty_q8[i] = 0;
+        ff_q8[i] = 0;          /* [AI] R76 */
         v_ramp[i] = 0;
         v_cmd[i] = 0;
         wheel_speed[i] = 0;
+        wheel_speed_q8[i] = 0; /* [AI] R76 */
+        spd1t_raw_q8[i] = 0;   /* [AI] R76 */
+        use_1t[i] = 0U;        /* [AI] R76 */
+        since_edge[i] = 0U;    /* [AI] R76 */
         win_sum[i] = 0;
         win_raw[i] = 0;   /* [AI] R33 */
         motors[i].phase = MOTOR_BRAKE;
@@ -429,7 +486,8 @@ static void start_run(uint32_t now)
         motors[i].brake_started_ms = 0;
         motors[i].corrections = 0;
         motors[i].stint_pos = 0;
-        duty_q[i] = 0;
+        duty_q8[i] = 0;
+        ff_q8[i] = 0;   /* [AI] R76 */
         v_cmd[i] = BENCH_CRUISE;
     }
     active_motor = 0;
@@ -876,9 +934,9 @@ void car_control_step(uint32_t now)
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         if (encoder_sign[i] == 0 && (win_raw[i] >= 20 || win_raw[i] <= -20)) {
             encoder_sign[i] = win_raw[i] > 0 ? 1 : -1;
-            duty_q[i] = 5000;             /* PI hand-off duty */
+            duty_q8[i] = 5000 << 8;       /* PI hand-off duty（[AI] R76: Q8 域） */
             v_ramp[i] = wheel_speed[i];   /* hand off at the kick speed */
-        } else if (encoder_sign[i] != 0 && duty_q[i] > (int32_t)4000U &&
+        } else if (encoder_sign[i] != 0 && duty_q8[i] > (int32_t)4000 * 256 &&
                    (win_raw[i] >= 20 || win_raw[i] <= -20) &&
                    ((win_raw[i] > 0 ? 1 : -1) != encoder_sign[i])) {
             encoder_sign[i] = (int8_t)(-encoder_sign[i]);   /* 预载极性错：翻转 */
@@ -1058,7 +1116,7 @@ void car_init(void)
         motors[i].phase = MOTOR_BRAKE;
         v_cmd[i] = 0;
         v_ramp[i] = 0;
-        duty_q[i] = 0;
+        duty_q8[i] = 0;
     }
     encoder_start();
     /* [AI] 按键(PE0)/使能开关(PD3)/ADC1(PB0)/IWDG 已由 MX_*_Init 配置；
@@ -1083,6 +1141,7 @@ void car_start_control_isr(void)
     /* [AI]  R19: 使能 DWT 周期计数器（ISR 占用率自测用；幂等） */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    cyc_per_ms = SystemCoreClock / 1000U;   /* [AI] R76: 1/T 测速换算基准（=168000 @168MHz） */
     (void)HAL_TIM_Base_Start_IT(&htim6);   /* [AI] CEN+UIE，首拍即进 car_control_isr */
 }
 
@@ -1294,7 +1353,7 @@ static uint8_t car_estop_clear_impl(uint8_t require_pd3)
     }
     car_safety_clear_pending(
         &motor_command, &estop_latched, &remote_running, &mt_running,
-        &mt_stop_req, &calibrating, v_cmd, v_ramp, duty_q, MOTOR_COUNT);
+        &mt_stop_req, &calibrating, v_cmd, v_ramp, duty_q8, MOTOR_COUNT);
     if (mode != FAULT) mode = STOPPED;
     for (unsigned i = 0U; i < MOTOR_COUNT; ++i) {
         motors[i].phase = MOTOR_BRAKE;
@@ -1401,7 +1460,8 @@ void car_control_isr(void)
         brake_all();
         for (unsigned i = 0U; i < MOTOR_COUNT; ++i) {
             v_ramp[i] = 0;
-            duty_q[i] = 0;
+            duty_q8[i] = 0;
+            ff_q8[i] = 0;
         }
     }
 
@@ -1413,33 +1473,87 @@ void car_control_isr(void)
         previous_count[i] = current;
         position_counts[i] += delta;
         win_sum[i] += delta;
+        /* [AI] R76: 1/T 混合测速的边沿观测（chassis-control-design §6.1）。
+           每 40µs 拍 delta≠0 即观测到边沿：用 DWT 计边沿间隔换算瞬时速度。
+           仅低速档算除法（每次边沿一次 64/32 除，低速下 ≤8 次/ms/轮），
+           高速档只记时刻零除法开销；间隔上限钳到 SPD_1T_DT_CAP_MS 防
+           DWT 回绕产生假尖峰。 */
+        if (delta != 0) {
+            uint32_t dt = isr_t0 - edge_t[i];
+            uint32_t dt_cap = cyc_per_ms * SPD_1T_DT_CAP_MS;
+            if (dt > dt_cap) dt = dt_cap;
+            if (use_1t[i] != 0U && since_edge[i] != 0U && dt != 0U) {
+                spd1t_raw_q8[i] = (int32_t)
+                    (((int64_t)delta * (int64_t)cyc_per_ms << 8) / (int64_t)dt);
+            }
+            edge_t[i] = isr_t0;
+            since_edge[i] = 0U;
+        } else if (since_edge[i] < SPD_1T_ZERO_TICKS) {
+            since_edge[i]++;
+            if (since_edge[i] >= SPD_1T_ZERO_TICKS) spd1t_raw_q8[i] = 0;
+        }
     }
 
-    if (++win_cnt >= 25U) {              /* 1 ms: M-method speed + PI */
+    if (++win_cnt >= 25U) {              /* 1 ms: M/T 混合测速 + PI */
         win_cnt = 0U;
         for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
             int32_t sum = win_sum[i];
             win_sum[i] = 0;
             win_raw[i] = sum;   /* [AI] R33: 判向用原始窗增量（先于归一） */
             if (encoder_sign[i] == 0) continue;
-            wheel_speed[i] = sum * encoder_sign[i];       /* counts/ms */
-            /* [AI] R39: 遥测 EMA，α=1/16（τ≈16ms @1kHz），Q8 无截断死区 */
-            wheel_filt_q8[i] += ((wheel_speed[i] << 8) - wheel_filt_q8[i]) >> 4;
+            /* [AI] R76: M/1T 档位切换（带迟滞）：低速切 1/T 时用 M 值预置
+               spd1t，防止切档瞬间拿到上一段低速期的陈旧值。 */
+            int32_t m = sum * encoder_sign[i];           /* counts/ms */
+            if (use_1t[i] != 0U) {
+                if (m >= SPD_1T_THRESH_HI) use_1t[i] = 0U;
+            } else if (m < SPD_1T_THRESH_LO) {
+                use_1t[i] = 1U;
+                spd1t_raw_q8[i] = m;
+            }
+            int32_t spd_q8 = (use_1t[i] != 0U)
+                ? spd1t_raw_q8[i] * encoder_sign[i]
+                : (m << 8);
+            wheel_speed_q8[i] = spd_q8;
+            /* 四舍五入整数视图：coast_stop(±5)/still 判定(±5)/last_motion(±1)
+               等旧阈值语义不变 */
+            wheel_speed[i] = (spd_q8 + (spd_q8 >= 0 ? 128 : -128)) >> 8;
+            /* [AI] R39: 遥测 EMA，α=1/16（τ≈16ms @1kHz），Q8 无截断死区。
+               R76 起直接吃混合估计的 Q8 值——低速段遥测噪声同步受益。 */
+            wheel_filt_q8[i] += (spd_q8 - wheel_filt_q8[i]) >> 4;
             if (estop_latched != 0U) {
                 v_cmd[i] = 0;
                 v_ramp[i] = 0;
-                duty_q[i] = 0;
+                duty_q8[i] = 0;
+                ff_q8[i] = 0;
                 continue;
             }
             int32_t d = v_cmd[i] - v_ramp[i];
             if (d > SPEED_RAMP_STEP) d = SPEED_RAMP_STEP;
             if (d < -SPEED_RAMP_STEP) d = -SPEED_RAMP_STEP;
             v_ramp[i] += d;                                /* slew limit */
-            int32_t e = v_ramp[i] - wheel_speed[i];
-            duty_q[i] += e / SPEED_KP_DIV + e / SPEED_KI_DIV;
-            int32_t lim = (int32_t)MAX_DUTY_PERCENT * 100;
-            if (duty_q[i] > lim) duty_q[i] = lim;
-            if (duty_q[i] < -lim) duty_q[i] = -lim;
+            /* [AI] R76: 误差升 Q8 域；增益 e/2+e/4 → e_q8/512+e_q8/1024，
+               严格等价但积分器（duty_q8）亚 LSB 累加，不再有整型死区 */
+            int32_t e_q8 = (v_ramp[i] << 8) - spd_q8;
+            duty_q8[i] += e_q8 / (SPEED_KP_DIV * 256) +
+                          e_q8 / (SPEED_KI_DIV * 256);
+            int32_t lim_q8 = (int32_t)MAX_DUTY_PERCENT * 100 * 256;
+            if (duty_q8[i] > lim_q8) duty_q8[i] = lim_q8;
+            if (duty_q8[i] < -lim_q8) duty_q8[i] = -lim_q8;
+            /* [AI] R76: 静摩擦前馈（chassis-control-design §6.3）——
+               "堵"相位按指令符号补固定占空比，起动后每 ms 滑出 1/8。
+               值是 car2 转述的 ~75%（待复测，台架首测项）。 */
+            {
+                int32_t spd_abs = spd_q8 < 0 ? -spd_q8 : spd_q8;
+                if (v_cmd[i] == 0) {
+                    ff_q8[i] = 0;
+                } else if (spd_abs < FF_STUCK_EPS_Q8) {
+                    ff_q8[i] = (v_cmd[i] > 0 ? 1 : -1) *
+                               (FF_BREAKAWAY_DUTY * 256);
+                } else if (ff_q8[i] != 0) {
+                    ff_q8[i] -= ff_q8[i] >> 3;
+                    if (ff_q8[i] < 32 && ff_q8[i] > -32) ff_q8[i] = 0;
+                }
+            }
         }
     }
 
@@ -1448,14 +1562,21 @@ void car_control_isr(void)
          * 踢动学习极性；零目标永远 BRAKE，避免零指令下轮子意外转动 */
         uint8_t phase_drive = (uint8_t)(motors[i].phase == MOTOR_DRIVE);
         if (encoder_sign[i] == 0 && v_cmd[i] == 0) phase_drive = 0U;
+        /* [AI] R76: 输出占空比 = PI 状态 + 摩擦前馈，Q8 → 0.01% 整数域，
+           钳到 MAX_DUTY 后交给安全门（门内仍有 85% 二次钳位） */
+        int32_t out_q8 = duty_q8[i] + ff_q8[i];
+        int32_t lim_q8 = (int32_t)MAX_DUTY_PERCENT * 100 * 256;
+        if (out_q8 > lim_q8) out_q8 = lim_q8;
+        if (out_q8 < -lim_q8) out_q8 = -lim_q8;
         car_motor_output_t output = car_motor_output_gate(
             estop_latched, (uint8_t)(mode == CALIBRATING),
             phase_drive,
-            (uint8_t)(encoder_sign[i] == 0), forward_dir[i], duty_q[i]);
+            (uint8_t)(encoder_sign[i] == 0), forward_dir[i], out_q8 >> 8);
         if (output.reset_controller != 0U) {
             v_cmd[i] = 0;
             v_ramp[i] = 0;
-            duty_q[i] = 0;
+            duty_q8[i] = 0;
+            ff_q8[i] = 0;
         }
         if (output.action == CAR_MOTOR_OUTPUT_BRAKE) {
             motor_brake(i);
@@ -1470,5 +1591,12 @@ void car_control_isr(void)
         uint32_t dt = DWT->CYCCNT - isr_t0;
         dbg_isr_last_cycles = dt;
         if (dt > dbg_isr_max_cycles) dbg_isr_max_cycles = dt;
+    }
+
+    /* [AI] R76 F12: 丢拍检测（AGENTS §3"不丢拍"硬性判据，CAN-BRINGUP §6.1）。
+       退出时 UIF 已再次置位 = 更新事件落在了本拍处理期间 → 下一拍被推迟
+       （若连续则丢拍）。计数器只增不减，SWD 直读。 */
+    if ((TIM6->SR & TIM_SR_UIF) != 0U) {
+        if (dbg_isr_overrun_cnt < 0xFFFFFFFFU) dbg_isr_overrun_cnt++;
     }
 }

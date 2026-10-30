@@ -13,6 +13,7 @@
 #include "i2c.h"
 #include "iwdg.h"
 #include "stm32f4xx.h"
+#include <math.h>
 
 #define ICM_SCL_PIN      10U
 #define ICM_SDA_PIN      11U
@@ -272,13 +273,17 @@ void imu_update(uint32_t now_ms, int still)
         s_acc_mg[1] += (ay - s_acc_mg[1]) * IMU_ACCEL_ALPHA;
         s_acc_mg[2] += (az - s_acc_mg[2]) * IMU_ACCEL_ALPHA;
 
-        /* 倾角：重力方向解算（坐标系未标定，仅作参考量，不参与控制） */
-        if (s_acc_mg[2] > 1.0f || s_acc_mg[2] < -1.0f) {
-            float pitch = (s_acc_mg[1] / s_acc_mg[2]);          /* tan(pitch) 近似 */
-            /* 一级近似：小角下 atan(x) ≈ x，倾角只用于遥测/诊断 */
-            s_pitch_deg = -pitch * 57.29578f;
-            float roll = (s_acc_mg[0] / s_acc_mg[2]);
-            s_roll_deg = roll * 57.29578f;
+        /* [AI] R76: 倾角按已知竖装（+Y 朝上）重推（rak/docs/canopen-bitfields.md §7）。
+           旧实现假设芯片 Z 朝上的小角近似（-ay/az、ax/az）：模块竖装时重力沿
+           芯片 Y 轴、az≈0，比值爆炸 → 2026-10-30 台架实测 pitch/roll ≈ ±163°
+           且随轮振漂移。现把加速度旋到水平系（x_h=x_c, y_h=z_c, z_h=y_c）后
+           用 atan2 解算：车体水平时 a_yc≈+1g、a_zc≈0 → pitch/roll ≈ 0。
+           影响面 = 遥测/OLED（imu_tilt_deg 消费者），不碰稳定器闭环；符号约定
+           待现场核对——修好确认前 Jetson 不消费 0x2031/0x2032（EKF 航向权威
+           = Jetson LSM6DSR，本就不依赖）。 */
+        if (s_acc_mg[1] > 1.0f || s_acc_mg[1] < -1.0f) {
+            s_pitch_deg = -atan2f(s_acc_mg[2], s_acc_mg[1]) * 57.29578f;
+            s_roll_deg  =  atan2f(s_acc_mg[0], s_acc_mg[1]) * 57.29578f;
         }
 
         uint8_t evt = 0U;
