@@ -2,14 +2,14 @@
 
 > **本文件是 v5 的规范件**，与 `docs/protocol.md`（v4）互斥：同一总线上只能跑一套。
 > 三个 MCU/上位机仓各存一份副本（伞形 `docs/`、`vehical_rak_motion/docs/`、
-> `vehical_rak_edge_ai/docs/`），内容必须逐字一致（`tools/canopen_gate.sh` 校验）。
+> `vehical_rak_arm/docs/`），内容必须逐字一致（`tools/canopen_gate.sh` 校验）。
 > 设计依据与落地进度：`docs/superpowers/specs/2026-10-29-can-v5-canopen-design.md`。
 
 ## 0. 现状（2026-10-29）
 
 | 侧 | 状态 |
 | --- | --- |
-| 底盘板 `vehical_rak_motion`（R73）、机械臂板 `vehical_rak_edge_ai`（A14） | **v5 已落地**（P0 栈接入 + P1 PDO 全链路，台架实测通过） |
+| 底盘板 `vehical_rak_motion`（R73）、机械臂板 `vehical_rak_arm`（A14） | **v5 已落地**（P0 栈接入 + P1 PDO 全链路，台架实测通过） |
 | Jetson `rak` | ⚠️ **仍是 v4 `CanSession`**，与 v5 板子**不兼容**；台架用 `tools/canopen_bringup.py`（原始 SocketCAN 主站）。生产主站 = P3（lely-core） |
 | 回滚 | 两 MCU 仓 `cmake -DAPP_USE_CANOPEN=OFF` 即编回 v4 固件（`Core/Src/app_can.c` 保留） |
 

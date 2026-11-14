@@ -15,8 +15,8 @@
 > 与 v5 板子不兼容，联调暂用上面的 `canopen_bringup.py`（生产主站 = 待办 P3）。
 
 
-C30D（STM32F407VET6 + 板载 AT8236）**四轮麦轮底盘**固件。姊妹仓 `vehical_rak_edge_ai`
-（git 仓名历史遗留）是**同一块板子**的**机械臂板 `vehical_rak_arm`** 角色（6 路舵机），
+C30D（STM32F407VET6 + 板载 AT8236）**四轮麦轮底盘**固件。姊妹仓 `vehical_rak_arm`
+是**同一块板子**的**机械臂板 `vehical_rak_arm`** 角色（6 路舵机，2026-11-14 起仓名与目录名已统一），
 上位机是 `VANexus/rak`（Jetson）。**2026-10-28 恢复双板架构**：舵机从本板迁出，本板收敛为
 pure 底盘（4 轮闭环 + IMU + CAN）——见 `README.md` §0 与 [`docs/KNOWN-ISSUE-runaway-wheel.md`](docs/KNOWN-ISSUE-runaway-wheel.md)（左前轮自转问题，issue rak#8）。
 
@@ -60,4 +60,4 @@ bash tools/cubemx_lint.sh             # 动了 .ioc / 外设就必须通过（�
 - 新 `.c/.h` 加进**顶层** `CMakeLists.txt`（`cmake/stm32cubemx/` 那份会被 CubeMX 覆盖）；只往 `USER CODE BEGIN/END` 标记对之间写。
 - CubeMX 重生成后必查（完整清单见 `docs/CUBEMX-SOP.md` §三第 3 步）：`stm32f4xx_it.c` 不得恢复 SVC/PendSV/SysTick 三个 handler；`SystemClock_Config` 的 HSE 设置是否被抹回 HSI；**`main.c` 的 `USER CODE BEGIN 2` 是否排在所有外设 `MX_*_Init()` 之后**；`.ioc` 里启用的每个外设是否都有对应的 `MX_*_Init()`（R20 就漏过 TIM2/TIM5/USART3）。`bash tools/cubemx_lint.sh` 覆盖了其中大部分。
 - 提交前：Debug + Release 零警告 + `canopen_gate.py` 通过（动了协议）+ `cubemx_lint.sh` 通过（动了外设）。开工先 `git pull`，收工就 push。
-- 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_edge_ai` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。
+- 改 `docs/PROTOCOL.md` / `protocol-signals.yaml` / `docs/BOARD-C30D.md` / `tools/can_check.py` / `env/activate.*` 时，**同一批把姊妹仓 `vehical_rak_arm` 的那份一起改**（两仓各存一份，手工 `cp`，内容保持一致），并在提交说明里写明改了什么。

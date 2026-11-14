@@ -15,7 +15,7 @@
 
 `vehical_rak_motion` = 轮趣 C30D（STM32F407VET6）上的 **四轮麦轮底盘**固件：
 4 路 AT8236 + 4 路正交编码器 + IMU + OLED，四轮 **25 kHz 硬实时速度闭环**。
-同硬件的姊妹仓 `vehical_rak_edge_ai`（git 仓名历史遗留）= **机械臂板 `vehical_rak_arm`**（6 路舵机）；
+同硬件的姊妹仓 `vehical_rak_arm` = **机械臂板**（6 路舵机，2026-11-14 前叫 `vehical_rak_edge_ai`）；
 上位机是 `rak`（Jetson / ROS 2）。三者靠 **CAN 2.0A @1 Mbps** 协作，协议见 [`docs/PROTOCOL.md`](PROTOCOL.md)。
 
 **当前进度**：**R64**（恢复双板架构，本板收敛为 pure 底盘：4 轮闭环 + IMU + CAN v4 主链路 + OLED + IWDG）；

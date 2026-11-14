@@ -52,9 +52,9 @@ python3 tools/canopen_bringup.py --can can0 --seconds 3 --no-drive   # NMT/SYNC/
 四轮 **25 kHz 硬实时速度闭环**，由 Jetson 上位机经 **CAN v4 @1 Mbps** 控制。
 
 > **2026-10-28 恢复双板架构**：机械臂从本板**迁出**，改由独立板 `vehical_rak_arm`
-> （git 仓名历史遗留为 `vehical_rak_edge_ai`）承担 6 路舵机。本板**只做底盘**：
+> 承担 6 路舵机。本板**只做底盘**：
 > 4 轮闭环 + IMU + CAN。协议 **ID 与字节布局一字未动**（Jetson 侧零改动）。
-> 姊妹仓 = `vehical_rak_edge_ai`（**机械臂板**，同硬件、不同角色）；上位机 = `VANexus/rak`（Jetson）。
+> 姊妹仓 = `vehical_rak_arm`（**机械臂板**，同硬件、不同角色）；上位机 = `VANexus/rak`（Jetson）。
 
 条款与操作流程看本仓 [`AGENTS.md`](AGENTS.md) 与 [`CLAUDE.md`](CLAUDE.md)；
 协议看 [`docs/CANOPEN-V5.md`](docs/CANOPEN-V5.md)（唯一规范件）；
@@ -173,7 +173,7 @@ deadman：`cmd_seq` 100 ms 内必变 + `cmd_flags.bit0=1` + Operational，缺一
 
 ## 6. 参考资料（只读）
 
-**唯一来源**：`vehical_rak_edge_ai/docs/WHEELTEC L150Pro 智能小车资料_V2.1_2026.04.20.zip`（656 MB，未入 git）。
+**唯一来源**：`vehical_rak_arm/docs/WHEELTEC L150Pro 智能小车资料_V2.1_2026.04.20.zip`（656 MB，未入 git）。
 
 - `9.原理图/C30D 原理图和资源分配表/`：**引脚与硬件事实的最终出处**。
 - `8.芯片手册/`：`VP230.pdf`（板载 CAN 收发器）、`D版_AT8236.pdf`、`D版_STM32F407VET6.PDF`、IMU 手册。

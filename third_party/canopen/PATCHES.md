@@ -5,7 +5,7 @@
 | `CANopenNode/` | github.com/CANopenNode/CANopenNode（本仓经 gitcode 镜像 clone） | v4 @ `5a97d2d20962512823015bc12452d90c423c9f73`（2026-07-08） | Apache-2.0 |
 | `CANopenNode_STM32/` | github.com/CANopenNode/CanOpenSTM32 | mirror clone 2026-10-29 | Apache-2.0 |
 
-两块 MCU 仓（`vehical_rak_motion` / `vehical_rak_edge_ai`）持有**同一份**副本，
+两块 MCU 仓（`vehical_rak_motion` / `vehical_rak_arm`）持有**同一份**副本，
 `docs/canopen/*.eds` + 生成的 `Core/{Inc/OD.h,Src/OD.c}` 按节点分别生成。
 CI 用 `sha256sum third_party/canopen/CANopenNode/CANopen.c` 等比对两仓一致性。
 

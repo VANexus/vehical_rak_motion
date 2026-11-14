@@ -22,7 +22,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-NODES = {"vehical_rak_motion": "chassis", "vehical_rak_edge_ai": "arm"}
+NODES = {"vehical_rak_motion": "chassis", "vehical_rak_arm": "arm"}
 
 
 def load_gen_eds(repo: Path):
@@ -115,7 +115,7 @@ def check_third_party(root: Path) -> int:
                 out[str(p.relative_to(base))] = hashlib.sha256(p.read_bytes()).hexdigest()
         return out
     a = digest(root / "vehical_rak_motion" / "third_party/canopen")
-    b = digest(root / "vehical_rak_edge_ai" / "third_party/canopen")
+    b = digest(root / "vehical_rak_arm" / "third_party/canopen")
     if a == b:
         print(f"[ ok ] third_party/canopen 两仓一致（{len(a)} 文件）")
         return 0

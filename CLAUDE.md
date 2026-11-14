@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 5. [`docs/ROS2-CONTROL-ARCH.md`](docs/ROS2-CONTROL-ARCH.md) — **进行中的架构变更**（见下）
 6. [`docs/CUBEMX-SOP.md`](docs/CUBEMX-SOP.md) — **改任何外设/配置前必读**：外设配置一律走 CubeMX（含无头命令参考、生成后必查清单、反模式）
 
-姊妹仓 `vehical_rak_edge_ai`（git 仓名历史遗留）是同一块板的**机械臂板 `vehical_rak_arm`** 角色（6 路舵机）；上位机是 `VANexus/rak`（Jetson）。**2026-10-28 恢复双板架构**：舵机已从本板迁到机械臂板（R64），本板收敛为 pure 底盘。
+姊妹仓 `vehical_rak_arm`（2026-11-14 前叫 `vehical_rak_edge_ai`）是同一块板的**机械臂板 `vehical_rak_arm`** 角色（6 路舵机）；上位机是 `VANexus/rak`（Jetson）。**2026-10-28 恢复双板架构**：舵机已从本板迁到机械臂板（R64），本板收敛为 pure 底盘。
 
 ## 常用命令
 
