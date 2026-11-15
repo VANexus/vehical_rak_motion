@@ -68,6 +68,7 @@ AccessType=ro
 DefaultValue=0x00000000
 PDOMapping=0
 
+CountLabel=NMT
 
 [1001]
 ParameterName=Error register
@@ -78,6 +79,7 @@ AccessType=ro
 DefaultValue=0x00
 PDOMapping=1
 
+CountLabel=EM
 
 [1003]
 ParameterName=Pre-defined error field
@@ -95,6 +97,7 @@ AccessType=rw
 DefaultValue=0x00000080
 PDOMapping=0
 
+CountLabel=SYNC
 
 [1006]
 ParameterName=Communication cycle period
@@ -105,6 +108,7 @@ AccessType=rw
 DefaultValue=0
 PDOMapping=0
 
+CountLabel=SYNC_PROD
 
 [1007]
 ParameterName=Synchronous window length
@@ -122,6 +126,7 @@ ObjectType=0x8
 ;StorageLocation=RAM
 SubNumber=0x5
 
+CountLabel=STORAGE
 
 [1011]
 ParameterName=Restore default parameters
@@ -139,6 +144,7 @@ AccessType=rw
 DefaultValue=0x00000100
 PDOMapping=0
 
+CountLabel=TIME
 
 [1014]
 ParameterName=COB-ID EMCY
@@ -146,9 +152,10 @@ ObjectType=0x7
 ;StorageLocation=PERSIST_COMM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x80+$NODEID
+DefaultValue=$NODEID+0x80
 PDOMapping=0
 
+CountLabel=EM_PROD
 
 [1015]
 ParameterName=Inhibit time EMCY
@@ -166,6 +173,7 @@ ObjectType=0x8
 ;StorageLocation=PERSIST_COMM
 SubNumber=0x9
 
+CountLabel=HB_CONS
 
 [1017]
 ParameterName=Producer heartbeat time
@@ -1017,7 +1025,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=ro
-DefaultValue=0x600+$NODEID
+DefaultValue=$NODEID+0x600
 PDOMapping=1
 
 
@@ -1027,7 +1035,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=ro
-DefaultValue=0x580+$NODEID
+DefaultValue=$NODEID+0x580
 PDOMapping=1
 
 
@@ -1087,7 +1095,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x200
+DefaultValue=$NODEID+0x200
 PDOMapping=0
 
 
@@ -1127,7 +1135,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x300
+DefaultValue=$NODEID+0x300
 PDOMapping=0
 
 
@@ -1607,7 +1615,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x180
+DefaultValue=$NODEID+0x180
 PDOMapping=0
 
 
@@ -1667,7 +1675,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x280
+DefaultValue=$NODEID+0x280
 PDOMapping=0
 
 
@@ -1727,7 +1735,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x380
+DefaultValue=$NODEID+0x380
 PDOMapping=0
 
 
@@ -1787,7 +1795,7 @@ ObjectType=0x7
 ;StorageLocation=RAM
 DataType=0x0007
 AccessType=rw
-DefaultValue=0x480
+DefaultValue=$NODEID+0x480
 PDOMapping=0
 
 

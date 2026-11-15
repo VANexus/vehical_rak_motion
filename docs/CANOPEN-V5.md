@@ -27,18 +27,24 @@
 | 层 | 由谁定义 | 不许手写 |
 | --- | --- | --- |
 | 协议语义 | CiA 301（EN 50325-4）+ CiA 304（EN 50325-5，安全） | 自造帧表 |
-| 对象清单（SSOT） | `docs/canopen/<node>.json` | 直接改 `OD.c/h` |
-| EDS | `docs/canopen/<node>.eds`（由 `tools/canopen/gen_eds.py` 从清单生成） | 手改 |
-| 固件 OD | `Core/Inc/OD.h` + `Core/Src/OD.c`，由 **CANopenEditor 官方 `CanOpenNodeV4` 导出器**从 EDS 生成 | 手改 |
+| 对象字典（SSOT） | `docs/canopen/<node>.xdd`（CANopenEditor 工程文件） | 手改 `OD.c/h` |
+| 固件 OD | `Core/Inc/OD.h` + `Core/Src/OD.c`，由 **CANopenEditor 官方 `CanOpenNodeV4` 导出器**从 XDD 生成 | 手改 |
+| EDS / JSON（历史） | `docs/canopen/<node>.eds`、`<node>.json`（`gen_eds.py` 产物，仅作图档与门禁比对） | 当作 OD 输入 |
 | 协议栈 | `third_party/canopen/CANopenNode`（v4，含 304）+ `CANopenNode_STM32`，两仓同哈希 | 改栈需记入 `PATCHES.md` |
 | 桥接 | `Core/Src/app_canopen.c`（PDO 变量 ↔ app_car/app_arm/app_joint） | — |
 
 重新生成：
 ```bash
-python3 tools/canopen/gen_eds.py docs/canopen/<node>.json tools/canopen/template.eds docs/canopen/<node>.eds
-dotnet EDSSharp.dll --infile docs/canopen/<node>.eds --outfile OD.c --type CanOpenNodeV4
+# 唯一入口：官方导出器吃 XDD，产出 OD.c/OD.h
+dotnet EDSSharp.dll --infile docs/canopen/<node>.xdd --outfile OD.c --type CanOpenNodeV4
 cp OD.c Core/Src/OD.c; cp OD.h Core/Inc/OD.h
+python3 tools/canopen_gate.py --repo .
 ```
+> **为什么是 XDD 而不是 EDS**：CANopenNode 官方导出器要求每个通信对象带 `CO_countLabel`
+> （见 CANopenNode `doc/objectDictionary.md`）。实测 EDS 文本格式不承载该字段——
+> 用官方导出器吃 EDS 时 `OD_CNT_NMT/EM/HB_PROD` 等宏全部缺失，`CANopen.c` 直接 `#error`；
+> 官方 EDS→XDD 转换也会丢字段（`CO_countLabel` 计数为 0）。因此 XDD 是唯一可行 SSOT。
+> `<node>.json` 与 `<node>.eds` 暂时保留（门禁与文档仍引用），**不得再作为 OD 输入**。
 
 ## 3. 通信对象与周期
 

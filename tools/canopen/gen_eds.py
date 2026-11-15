@@ -125,6 +125,17 @@ def main():
     set_value(di, "BaudRate_1000", "1")
 
     # --- 心跳 / 身份 / 通信对象 CountLabel（官方导出器要求）---
+    # 官方 CANopenNode V4 objectDictionary.md 为每个通信对象规定了 CountLabel，
+    # CanOpenNodeExporter_V4.VerifyCountLabel 逐一校验；缺一个，OD_CNT_* 就不生成，
+    # CANopen.c 编译直接 #error（2026-11-15 实测踩过：OD_CNT_NMT/EM/HB_PROD 缺失）。
+    set_value(find(sections, "1000"), "CountLabel", "NMT")
+    set_value(find(sections, "1001"), "CountLabel", "EM")
+    set_value(find(sections, "1005"), "CountLabel", "SYNC")
+    set_value(find(sections, "1006"), "CountLabel", "SYNC_PROD")
+    set_value(find(sections, "1010"), "CountLabel", "STORAGE")
+    set_value(find(sections, "1012"), "CountLabel", "TIME")
+    set_value(find(sections, "1014"), "CountLabel", "EM_PROD")
+    set_value(find(sections, "1016"), "CountLabel", "HB_CONS")
     set_value(find(sections, "1017"), "CountLabel", "HB_PROD")
     set_value(find(sections, "1200"), "CountLabel", "SDO_SRV")
     set_value(find(sections, "1280"), "CountLabel", "SDO_CLI")
@@ -201,11 +212,16 @@ def main():
         t_base = 0x180 + i * 0x100
         r_name, t_name = f"rpdo{i + 1}", f"tpdo{i + 1}"
         set_value(find(sections, f"{0x1400 + i:04X}"), "CountLabel", "RPDO")
+        # COB-ID 必须写成 `$NODEID+0x…`（CiA 301 默认标识符，与 CANopenNode
+        # DS301_profile.eds 的 `0xC0000180+$NODEID` 同源）：写死 0x200 会让主站
+        # 监听 0x200 而从站按 0x200+node 发，PDO 永远收不到（2026-11-15 实测）。
         set_value(find(sections, f"{0x1400 + i:04X}sub1"), "DefaultValue",
-                  f"0x{r_base:03X}" if r_name in pdo else f"0x{0x80000000 | r_base:08X}")
+                  f"$NODEID+0x{r_base:03X}" if r_name in pdo
+                  else f"0x{0x80000000 | r_base:08X}")
         set_value(find(sections, f"{0x1800 + i:04X}"), "CountLabel", "TPDO")
         set_value(find(sections, f"{0x1800 + i:04X}sub1"), "DefaultValue",
-                  f"0x{t_base:03X}" if t_name in pdo else f"0x{0x80000000 | t_base:08X}")
+                  f"$NODEID+0x{t_base:03X}" if t_name in pdo
+                  else f"0x{0x80000000 | t_base:08X}")
         set_value(find(sections, f"{0x1800 + i:04X}sub2"), "DefaultValue",
                   str(int(tpdo_types.get(t_name, 254))))
 
