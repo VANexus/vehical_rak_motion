@@ -63,6 +63,8 @@ python3 tools/canopen_gate.py --repo .
 
 **底盘 node 1**
 
+> 轮序、电机方向、编码器方向、轮径/力臂的**权威定义**在 `Core/Inc/wheel_config.h`，本文不复述数值。
+
 | PDO | COB-ID | 映射（对象） | 周期 | 实测/3 s |
 | --- | --- | --- | --- | --- |
 | RPDO1 | 0x201 | `0x2000..0x2003` W1..W4 速令（INT16，0.01 rad/s） | 事件（主站 100 Hz） | — |
@@ -107,6 +109,12 @@ python3 tools/canopen_bringup.py --can can0 --seconds 3      # NMT Start + SYNC 
 ```
 判据：心跳 `701/702=05`；§4 的实测列速率；`cmd_en=1`（`cmd_flags=1` 时）；
 `ip -details link show can0` 的 berr-counter tx 0 / rx 0。
+
+> **单主站纪律（2026-11-16）**：任何往 `can0` 发帧的测试（本脚本、`chassis_forward.py`、
+> `cansend`、SDO 轮询）前，先确认总线上没有第二个 CANopen 主站：
+> `pgrep -af 'controller_manager|mecanum_drive_controller|canopen_bringup|chassis_(forward|ladder)'`。
+> 2026-11-16 两次“前进/后退”目视实测期间 `mecanum_drive_controller` 一直在跑，
+> 调试脚本的 RPDO 与控制器指令叠加，方向结论可能被污染；重测时先停 ROS 栈，或只留一套主站。
 
 ## 7. 上游坑（必须知道，否则板子"看起来死了"）
 

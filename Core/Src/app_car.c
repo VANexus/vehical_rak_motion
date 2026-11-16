@@ -5,6 +5,7 @@
 #include "app_buzz.h"
 #include "app_imu.h"
 #include "app_car_safety.h"
+#include "wheel_config.h"
 #include "main.h"
 #include "tim.h"
 #include "adc.h"
@@ -75,7 +76,9 @@
      这两处**只影响本板自检与 OLED 体速度**（v5 远程路径下发四轮速令，不经过本 IK），
      但自检通过与否是台架验收依据，假阳性代价高。
      一致性由伞形仓 `tools/geometry_gate.py` 守护（比对本文件与上位机 yaml/URDF）。 */
-#define IK_PERMM_NUM  3565L   /* counts per mm, x10 (61600/2πr, r=27.5mm) */
+/* counts/mm ×10：由 wheel_config.h 的 WHEEL_CPR/WHEEL_RADIUS_UM 推导
+   （61600/(2π×27.5)≈356.5）；geometry_gate 会按同一公式复核。 */
+#define IK_PERMM_NUM  3565L
 #define IK_PERMM_DEN 10000L
 
 /* [AI] R9 陀螺仪自稳定调参（板载 ICM20948/MPU6050；算法见 wheel_control_stabilize）
@@ -137,11 +140,12 @@ static const uint8_t target_turns[MOTOR_COUNT] = {3, 3, 3, 3};  /* equal targets
    stop distance at approach speed is ~6.1-6.7k counts per motor, so
    each trigger sits (coast - 0.005 turn) before the target. */
 static const int32_t brake_lead[MOTOR_COUNT] = {6350, 6420, 5800, 6370};
-static const int32_t ik_lw = 260L;   /* [AI] R74: 0.245/0.275 实测 → 半和 260mm（原 150 为估计值） */
+/* [AI] R74/R77: lx+ly 的唯一权威是 wheel_config.h 的 WHEEL_LEVER_UM。
+   R74 按 2026-10-14 实测把 150→260 mm；R77 起这里直接引用，不再写第二份数值。 */
+static const int32_t ik_lw = (int32_t)(WHEEL_LEVER_UM / 1000U);
 static const int8_t ik_sx[MOTOR_COUNT] = { 1,  1,  1,  1};
 static const int8_t ik_sy[MOTOR_COUNT] = {-1,  1,  1, -1};
 static const int8_t ik_sw[MOTOR_COUNT] = {-1,  1, -1,  1};
-static const int8_t forward_dir[MOTOR_COUNT] = {1, -1, -1, 1};
 static TIM_TypeDef *const enc_tim[MOTOR_COUNT] = {TIM2, TIM3, TIM4, TIM5};
 static volatile int32_t position_counts[MOTOR_COUNT];  /* ISR-owned */
 static uint32_t previous_count[MOTOR_COUNT];           /* ISR-owned */
@@ -968,8 +972,10 @@ void car_control_step(uint32_t now)
         int32_t w0 = wheel_speed[0], w1 = wheel_speed[1];
         int32_t w2 = wheel_speed[2], w3 = wheel_speed[3];
         int32_t vx_c = (w0 + w1 + w2 + w3) / 4;
-        int32_t vy_c = (-w0 + w1 + w2 - w3) / 4;
-        int32_t wz_c = (-w0 + w1 - w2 + w3) / 4;
+        int32_t vy_c = (wheel_lateral_dir[0] * w0 + wheel_lateral_dir[1] * w1 +
+                        wheel_lateral_dir[2] * w2 + wheel_lateral_dir[3] * w3) / 4;
+        int32_t wz_c = (wheel_yaw_dir[0] * w0 + wheel_yaw_dir[1] * w1 +
+                        wheel_yaw_dir[2] * w2 + wheel_yaw_dir[3] * w3) / 4;
         meas_vx_mmps = (int32_t)((int64_t)vx_c * 10000L / IK_PERMM_NUM);
         meas_vy_mmps = (int32_t)((int64_t)vy_c * 10000L / IK_PERMM_NUM);
         meas_wz_crads = (int32_t)((int64_t)wz_c * 1000000L /
@@ -1431,11 +1437,17 @@ void car_wheel_speeds(int32_t *out)   /* counts/ms,四轮 */
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) out[i] = wheel_speed[i];
 }
 
-/* [AI] R45: 编码器累计位置快照（CAN v4 WHEEL_POS 用，原始 quad counts，
-   上电=0）。单值读取天然原子，四轮快照允许跨拍混合（遥测用途无碍）。 */
+/* [AI] R45/R77: 编码器累计位置快照（CAN WHEEL_POS 用，上电=0）。
+   与 car_encoder_snapshot 的速度通道共用同一符号（encoder_sign，前进为正）：
+   原来直接返回原始 quad counts，W2/W4 会与速度反号，同一组 TPDO 里
+   出现"速度 +、位置 −"。未标定极性的轮按 0 上报，与速度通道一致。 */
 void car_wheel_positions(int32_t *out)
 {
-    for (unsigned i = 0; i < MOTOR_COUNT; ++i) out[i] = position_counts[i];
+    if (out == NULL) return;
+    for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+        int8_t sign = encoder_sign[i];
+        out[i] = (sign == 0) ? 0 : position_counts[i] * sign;
+    }
 }
 
 /* ---- 25 kHz control ISR: encoder accounting, ramp, PI, PWM ----
@@ -1508,7 +1520,11 @@ void car_control_isr(void)
                 if (m >= SPD_1T_THRESH_HI) use_1t[i] = 0U;
             } else if (m < SPD_1T_THRESH_LO) {
                 use_1t[i] = 1U;
-                spd1t_raw_q8[i] = m;
+                /* 这里必须存**原始**增量：spd1t_raw_q8 的定义是未归一计数，
+                   下面的 1/T 分支还要再乘一次 encoder_sign[i]。
+                   原来存 m（已乘过 sign），W2/W4 会被反号两次——
+                   低速档位正是 0.5 rad/s 测试所在区间，表现为"速度 +、位置 −"。 */
+                spd1t_raw_q8[i] = sum;
             }
             int32_t spd_q8 = (use_1t[i] != 0U)
                 ? spd1t_raw_q8[i] * encoder_sign[i]
@@ -1571,7 +1587,7 @@ void car_control_isr(void)
         car_motor_output_t output = car_motor_output_gate(
             estop_latched, (uint8_t)(mode == CALIBRATING),
             phase_drive,
-            (uint8_t)(encoder_sign[i] == 0), forward_dir[i], out_q8 >> 8);
+            (uint8_t)(encoder_sign[i] == 0), wheel_forward_dir[i], out_q8 >> 8);
         if (output.reset_controller != 0U) {
             v_cmd[i] = 0;
             v_ramp[i] = 0;

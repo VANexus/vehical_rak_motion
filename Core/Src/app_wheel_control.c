@@ -1,4 +1,5 @@
 #include "app_wheel_control.h"
+#include "wheel_config.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -10,14 +11,16 @@
  * 数值出处（均为历史台架/设计值，非本轮实测，待实车标定复核）：
  * - counts_per_revolution: 编码器 11PPR*4*30:1=61440，A 轮手测约 61602，B/C/D 未单独实测，
  *   暂用台架估算 61600（见 app_car.c LEGACY_BENCH_CPR_ESTIMATE 注释）。
- * - wheel_radius_um: 台架注释 2*pi*32.5mm（app_car.c IK 注释），未实测。
- * - rotational_lever_um: app_car.c ik_lw=150mm（半轴距+半轮距之和），未实测。
- * - encoder_direction: 与 app_car.c forward_dir 一致（历史实测的前进方向）。 */
+ * - wheel_radius_um / rotational_lever_um：唯一权威 wheel_config.h
+ *   （WHEEL_RADIUS_UM=27500、WHEEL_LEVER_UM=260000，2026-10-14 实测；
+ *   旧 32.5 mm / 150 mm 是台架估计值，R77 已修正）。
+ * - encoder_direction / 方向表：唯一权威在 Core/Inc/wheel_config.h，本文件只引用。
+ *   编码器极性与指令方向是两张独立表（电机极性与编码器接线极性各自独立）。 */
 const wheel_calibration_t car_wheel_calibration = {
-    .counts_per_revolution = {61600U, 61600U, 61600U, 61600U},
-    .wheel_radius_um = 32500U,
-    .rotational_lever_um = 150000U,
-    .encoder_direction = {1, -1, -1, 1},
+    .counts_per_revolution = {WHEEL_CPR_LIST},
+    .wheel_radius_um = WHEEL_RADIUS_UM,
+    .rotational_lever_um = WHEEL_LEVER_UM,
+    .encoder_direction = {WHEEL_ENC_DIR_LIST},
     .valid = 1U
 };
 
@@ -264,6 +267,9 @@ uint8_t wheel_control_encoder_state(
         position_urad[i] =
             counts * WHEEL_URAD_PER_REV /
             calibration->counts_per_revolution[i];
+        /* normalized_speed_counts_ms 的契约就是“已按学习极性归一”，
+           这里再乘 direction 等于把方向乘了两次（W2/W4 会反号）。
+           本函数的 direction 只作用于上面的原始位置计数。 */
         velocity_urad_s[i] = counts_per_ms_to_urad_s(
             normalized_speed_counts_ms[i],
             calibration->counts_per_revolution[i]);
@@ -302,7 +308,6 @@ uint8_t wheel_control_stabilize(
     int32_t *yaw_error_mrad_s_out,
     int32_t yaw_error_deriv_mrad_s2, uint16_t kd_permille)
 {
-    static const int8_t rotation_pattern[WHEEL_COUNT] = {-1, 1, -1, 1};
     int64_t yaw_from_encoders_mrad_s;
     int64_t yaw_error_mrad_s;
     int64_t correction;
@@ -319,11 +324,9 @@ uint8_t wheel_control_stabilize(
         gain_permille > 1000U)
         return 0U;
 
-    int64_t rotation_sum =
-        -(int64_t)measured_wheel_urad_s[0] +
-          (int64_t)measured_wheel_urad_s[1] -
-          (int64_t)measured_wheel_urad_s[2] +
-          (int64_t)measured_wheel_urad_s[3];
+    int64_t rotation_sum = 0;
+    for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
+        rotation_sum += (int64_t)wheel_yaw_dir[i] * measured_wheel_urad_s[i];
     yaw_from_encoders_mrad_s =
         rotation_sum * calibration->wheel_radius_um /
         calibration->rotational_lever_um / 4000LL;
@@ -354,7 +357,7 @@ uint8_t wheel_control_stabilize(
     for (unsigned i = 0U; i < WHEEL_COUNT; ++i) {
         int32_t before = wheel_target_urad_s[i];
         int64_t after = (int64_t)before +
-                        rotation_pattern[i] * correction;
+                        wheel_yaw_dir[i] * correction;
         wheel_target_urad_s[i] =
             (int32_t)clamp_i64(after, INT32_MIN, INT32_MAX);
         correction_urad_s[i] = wheel_target_urad_s[i] - before;

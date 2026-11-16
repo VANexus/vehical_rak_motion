@@ -1,4 +1,5 @@
 #include "app_wheel_control.h"
+#include "wheel_config.h"
 
 #include <assert.h>
 #include <limits.h>
@@ -28,8 +29,8 @@ static wheel_calibration_t signed_calibration(void)
 {
     wheel_calibration_t calibration = {
         .counts_per_revolution = {60000U, 61000U, 62000U, 63000U},
-        .wheel_radius_um = 50000U,
-        .rotational_lever_um = 150000U,
+        .wheel_radius_um = WHEEL_RADIUS_UM,
+        .rotational_lever_um = WHEEL_LEVER_UM,
         .encoder_direction = {1, -1, -1, 1},
         .valid = 1U
     };
@@ -94,12 +95,13 @@ static void test_default_calibration_is_preloaded_and_valid(void)
         raw_position, raw_speed, 0x0FU, &car_wheel_calibration,
         position, velocity, &valid_mask));
     assert(valid_mask == 0x0FU);
-    /* [AI] R46: 位置符号跟随 encoder_direction 预置 {1,-1,-1,1}；
-       速度符号只由 normalized_speed 符号决定（不经 direction 翻转） */
-    assert(position[0] > 0 && position[1] < 0);
-    assert(position[2] < 0 && position[3] > 0);
-    for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
+    /* [AI] R46/R77: 位置符号 = encoder_direction（唯一权威 wheel_config.h）；
+       速度符号只由 normalized_speed 符号决定（不经 direction 翻转）。 */
+    for (unsigned i = 0U; i < WHEEL_COUNT; ++i) {
+        assert((position[i] > 0) ==
+               (car_wheel_calibration.encoder_direction[i] > 0));
         assert(velocity[i] > 0);
+    }
 }
 
 static void test_encoder_position_velocity_and_direction_units(void)
@@ -308,9 +310,10 @@ static void test_stabilizer_correction_is_wheel_domain_and_bounded(void)
     for (unsigned i = 0U; i < WHEEL_COUNT; ++i)
         assert(target[i] == 1000000 + correction[i]);
 
-    /* [AI] R46: D 项——误差 1000 mrad/s、微分 2000 mrad/s²、kd=150：
-       P=1000*150000/32500*500‰≈2.31e6, D=2000*150000/32500*150‰≈1.38e6,
-       合成 3.69e6 > 限幅 50000 → 仍满限幅，但符号随误差/微分同向。 */
+    /* [AI] R46/R77: D 项——误差 1000 mrad/s、微分 2000 mrad/s²、kd=150：
+       夹具改用真值 L=260000 / r=27500：
+       P=1000*260000/27500*500≈4.73e6, D=2000*260000/27500*150≈2.84e6,
+       合成 7.56e6 > 限幅 50000 → 仍满限幅，但符号随误差/微分同向。 */
     int32_t target2[WHEEL_COUNT] = {1000000, 1000000, 1000000, 1000000};
     int32_t correction2[WHEEL_COUNT] = {0};
     assert(wheel_control_stabilize(target2, measured, 1000, &calibration,
@@ -320,7 +323,7 @@ static void test_stabilizer_correction_is_wheel_domain_and_bounded(void)
     assert(correction2[1] == -50000);
 
     /* [AI] R46: kd>0、微分反向 → 修正量低于纯 P（D 抵消瞬态）。
-       小误差场景：err=100 mrad/s → P≈1538; deriv=-2000, kd=150 → D≈-1.38e6,
+       小误差场景：err=100 mrad/s → P≈473; deriv=-2000, kd=150 → D≈-2.84e6,
        合成负 → 钳位到 -50000（限幅内则应为负值）。 */
     int32_t target3[WHEEL_COUNT] = {1000000, 1000000, 1000000, 1000000};
     int32_t correction3[WHEEL_COUNT] = {0};

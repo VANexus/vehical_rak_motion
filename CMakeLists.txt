@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/app_car.c
     Core/Src/app_sign_store.c
     Core/Src/app_wheel_control.c
+    Core/Src/wheel_config.c
     Core/Src/app_can_control_policy.c
     Core/Src/app_serial.c
     Core/Src/app_serial_session.c

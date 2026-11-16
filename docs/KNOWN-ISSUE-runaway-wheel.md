@@ -1,4 +1,7 @@
 # 已知问题：左前轮 `allow_motion=true` 后自转不停
+> 轮序/方向/标定常数以 `Core/Inc/wheel_config.h` 为准；本文只记录现象与结论。
+
+
 
 > 来源：GitHub issue **VANexus/rak#8** —《[底盘] allow_motion=true 后左前轮自转不停
 > （累计 ≈233 圈），只有断电才停》。首次报告 2026-10-17，固件 `build_tag=R63`。
