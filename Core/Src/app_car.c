@@ -229,7 +229,7 @@ static volatile uint32_t motor_vbat_mv;
 static volatile int8_t enable_switch;
 volatile uint8_t car_drive_gate_dbg;   /* [AI] R58: 驱动门自诊断位图（DIAG STATE bit6-10，协议冻结版） */
 static uint8_t reset_cause;
-const char build_tag[] = "R76";   /* [AI] R76（2026-10-30，低速质量批，rak TODO R76 三项，均不动协议/OD）：
+const char build_tag[] = "R83";   /* [AI] R76（2026-10-30，低速质量批，rak TODO R76 三项，均不动协议/OD）：
   *   ① F12 丢拍计数器 dbg_isr_overrun_cnt（SWD 直读）——AGENTS §3"不丢拍"硬性判据
   *      （TIM6 回调退出时 UIF 残留即计数）。
   *   ② 低速 1/T 混合测速（|counts/ms|<8 切边沿间隔法，40µs 分辨率，迟滞 12 回 M）
@@ -969,6 +969,8 @@ void car_control_step(uint32_t now)
      * [AI] R38: 极性来源优先 Flash 预载（car_init）；本循环另做矛盾自检——
      * 强正向驱动(duty>40%)时 raw 增量极性若与预载极性相反（换线/预载坏），
      * 立即纠正并重新落盘，防止 R30 式正反馈飞车在预载路径复活。 */
+    static const uint8_t kSignSelfLearnEnable = 0U;  /* R83: 极性固定，见 car_init */
+    if (kSignSelfLearnEnable) {
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
         if (encoder_sign[i] == 0 && (win_raw[i] >= 20 || win_raw[i] <= -20)) {
             encoder_sign[i] = win_raw[i] > 0 ? 1 : -1;
@@ -1022,6 +1024,7 @@ void car_control_step(uint32_t now)
             store_pending = 1U;   /* 无论成败，本开机不再尝试 */
         }
     }
+    }  /* R83: end kSignSelfLearnEnable */
 
     /* forward kinematics: measured body velocity for 0x200 telemetry */
     {
@@ -1161,12 +1164,15 @@ void car_init(void)
     /* [AI] R38: Flash 扇区满则先擦（此刻 25kHz 未启动、电机未驱动，整片擦
      * ~1-2s 总线停顿安全）；有历史记录则直接预载极性，跳过上电 kick 跳拍。
      * 预载错的防线在 car_control_step 的矛盾自检（强正向驱动极性反转即纠正）。 */
-    if (sign_store_prepare() == 0U) {
-        int8_t stored_signs[MOTOR_COUNT];
-        if (sign_store_load(stored_signs) != 0U) {
-            for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
-                encoder_sign[i] = stored_signs[i];
-            }
+    /* [AI] R83 (2026-11-18): 极性固定为 wheel_config.h 的实测方向表，禁用自学习。
+       事故：R80 的矛盾自检在印刷垫打滑时把 W1 翻成 +1，速度环正反馈，
+       零指令下 W1 自转到 25 rad/s；被推一下就会冲出去。
+       方向表是台架实测真值（-1,+1,+1,-1），不允许地面动作改写。
+       代价：换线/换电机后必须重新标定 wheel_config.h，不能再靠 kick 自学。 */
+    {
+        static const int8_t kEncoderSigns[MOTOR_COUNT] = {WHEEL_ENC_DIR_LIST};
+        for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
+            encoder_sign[i] = kEncoderSigns[i];
         }
     }
     /* Debugger halts must not starve the watchdog. */
