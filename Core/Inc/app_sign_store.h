@@ -28,7 +28,14 @@
  * app 实测仅用 0x08013210 以下，末扇区与代码区无重叠。 */
 #define SIGN_STORE_MAGIC   0x53474E31UL
 #define SIGN_STORE_SLOT_N  8192U   /* 128KB / 16B */
-#define SIGN_STORE_SECTOR  FLASH_SECTOR_11
+/* [AI] R78 2026-11-17: 原来是 FLASH_SECTOR_11 —— **错的**。本板是 512 KB 的
+   STM32F407，扇区表只到 7；0x08060000 落在 **sector 7**（128 KB）。
+   擦除会返回错误（HAL_FLASHEx_Erase 报错）→ 极性记录只能写进最初那几十个空槽，
+   一旦槽用完就再也存不进去 → 每次开机都载入**最早那条（往往是学的错的）**记录，
+   kick 自检因为"已有记录"不再重学 → 车带着错极性跑，撞一次墙就彻底卡住。
+   STM32F407 512KB 扇区表：0-3=16KB(0x00000/0x04000/0x08000/0x0C000)、4=64KB(0x10000)、
+   5..7=128KB(0x20000/0x40000/0x60000)。 */
+#define SIGN_STORE_SECTOR  FLASH_SECTOR_7
 #define SIGN_STORE_BASE    0x08060000UL
 
 /* [AI] 开机调用（25kHz/调度器启动前）：扇区满则整片擦除。

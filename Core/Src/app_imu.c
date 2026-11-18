@@ -281,9 +281,18 @@ void imu_update(uint32_t now_ms, int still)
            影响面 = 遥测/OLED（imu_tilt_deg 消费者），不碰稳定器闭环；符号约定
            待现场核对——修好确认前 Jetson 不消费 0x2031/0x2032（EKF 航向权威
            = Jetson LSM6DSR，本就不依赖）。 */
-        if (s_acc_mg[1] > 1.0f || s_acc_mg[1] < -1.0f) {
-            s_pitch_deg = -atan2f(s_acc_mg[2], s_acc_mg[1]) * 57.29578f;
-            s_roll_deg  =  atan2f(s_acc_mg[0], s_acc_mg[1]) * 57.29578f;
+        /* [AI] R78 2026-11-17：R76 的"竖装 +Y 朝上"假设**与实物不符**。SWD 直读
+           `s_acc_mg = [35.0, 3.6, 955.9] mg`（车静止、地面水平）——重力沿**芯片 +Z**，
+           即模块是**平装**（+Z 朝上、X 前置、Y 左）。按竖装解算当然得 ±90°：
+           实测 pitch=-89.79°、roll=+84.18°，Note 消费者只能当噪声。
+           平装正解（REP-103：x 前 y 左 z 上；加速度计测的是比力，静止时沿"上"为 +1g）：
+             抬头(绕 +y 正转) → a_x = -g·sin(pitch)  → pitch = atan2(-a_x, a_z)
+             右侧下沉(绕 +x 正转) → a_y = -g·sin(roll) → roll = atan2(-a_y, a_z)
+           符号约定仍需现场核对（把车头抬起 10° 应读 +10°），确认前 Jetson 不消费
+           0x2031/0x2032；稳定器用的是陀螺 yaw rate，与本函数无关。 */
+        if (s_acc_mg[2] > 1.0f || s_acc_mg[2] < -1.0f) {
+            s_pitch_deg = -atan2f(s_acc_mg[0], s_acc_mg[2]) * 57.29578f;
+            s_roll_deg  = -atan2f(s_acc_mg[1], s_acc_mg[2]) * 57.29578f;
         }
 
         uint8_t evt = 0U;

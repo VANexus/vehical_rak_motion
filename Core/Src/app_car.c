@@ -49,8 +49,15 @@
    但积分器状态本身升为 Q8（0.01%×256）：亚 LSB 误差不再被整型截断
    冻结（旧实现 e=1 时 e/2+e/4=0，积分死区——低速台阶化的成因之一，
    见 rak/docs/chassis-control-design.md §6.2）。 */
-#define SPEED_KP_DIV     2L   /* duty_q8 += err_q8 / 512          (P) */
-#define SPEED_KI_DIV     4L   /* duty_q8 += err_q8 / 1024 per 1 ms (I) */
+/* [AI] R81 2026-11-18 实测标定：PI **不是** 25 kHz 跑，而是
+   `if (++win_cnt >= 25U)` → 每 1 ms 一次（1 kHz）。旧增益
+   e/2+e/4（=0.75/ms）对应 0.85 %/s，爬满 85% 要 100 秒 —— 这就是
+   "指令 0.12 m/s 只走出 0.04 m/s"的真正原因（误差 30 counts/ms 时
+   占空比 1 秒才涨 0.9%）。
+   目标：满误差下 0.5 s 内爬到限幅。e_q8=7424 时需要 ≈3700 Q8/ms，
+   即增益 ≈0.5/ms → 用 e_q8/2。 */
+#define SPEED_KI_NUM     1L   /* duty_q8 += err_q8 * NUM / DEN  每 1 ms */
+#define SPEED_KI_DEN     2L
 #define V_CMD_LIMIT    350L   /* counts/ms safety clamp */
 #define RC_TIMEOUT_MS  100U   /* Jetson deadman (design: 100 ms) */
 
@@ -118,7 +125,14 @@
 #define FF_BREAKAWAY_DUTY 7500    /* 0.01% —— 静摩擦起步占空比 ~75%：
                                      car2 归档转述值（AGENTS §4：待复测），
                                      与 KICK_DUTY=75 同源；台架首测项 */
-#define FF_STUCK_EPS_Q8    256    /* |反馈| < 1 counts/ms（Q8）视作"堵"相位 */
+/* [AI] R79 2026-11-17：原判据 |反馈| < 1 counts/ms（Q8 256）太严 —— 实测车在
+   3% 占空比下就能以 0.6 rad/s 滚起来（≈6 counts/ms），于是"一开始动"前馈立刻
+   退出，只剩极弱的 PI 慢慢积分：占空比从 3% 爬到 85% 要几十秒，表现为"有目标、
+   有电、慢慢挪"。改成相对判据：实测转速 < 目标 20% 就算"还没起来"，继续给
+   起步前馈；起来之后同样按 1/8 滑出。 */
+/* [AI] R80 修正：旧宏名与用法配套写反了（阈值 = tgt_q8/51 ≈ 目标的 2%），
+   等于前馈几乎一上电就退出。直接给"目标百分比"的整数分母：5 = 20%。 */
+#define FF_STUCK_TARGET_DIV    5        /* 目标/5 = 20%：低于它仍算"没起来" */
 
 enum { MOTOR_COUNT = WHEEL_COUNT };
 enum run_mode { IDLE, RUNNING, DONE, STOPPED, FAULT, CALIBRATING, CALIB_DONE };
@@ -152,6 +166,26 @@ static uint32_t previous_count[MOTOR_COUNT];           /* ISR-owned */
 static volatile int8_t encoder_sign[MOTOR_COUNT];
 /* [AI] R38: 预载极性被矛盾自检纠正时置位，触发重新落盘（任务态读写） */
 static volatile uint8_t sign_store_dirty;
+/* [AI] R77: 极性矛盾必须连续多拍才算数（见下方矛盾自检），每轮一个计数。 */
+static uint8_t sign_flip_pending[MOTOR_COUNT];
+/* [AI] R78: 极性"卡死"兜底。极性错时闭环反向用力，轮子可能根本转不起来
+   （|wheel_speed| 永远够不到矛盾自检的 10 counts/ms），于是自检救不回来。
+   这里再加一条：占空比已经 >60% 但滤波转速连续 2 s 恒 <2 counts/ms（有电不转），
+   把这个轮的极性清 0，交给 kick 自检重学。 */
+static uint16_t sign_stall_ms[MOTOR_COUNT];
+/* [AI] R78 调试镜像：25 kHz ISR 每拍把**首轮**控制量写进这块 RAM，
+   SWD 直读即可（不占 OD、不改协议、不增加线上字节）。字段：
+   [0]=v_cmd [1]=v_ramp [2]=duty_q8>>8 [3]=wheel_speed
+   [4]=estop_latched [5]=motors[0].phase [6]=ISR 心跳计数 [7]=ff_q8>>8
+   排查完可整段删除（量产不依赖它）。 */
+/* [AI] R79 快照一致性：SWD 读是**非原子**的，而 ISR 40 µs 就在改这些字。
+   旧版把字段分散在两处写，读出来 d 值来自不同趟 —— 会看到"e>0 但 duty<0"
+   这种自相矛盾的数。现在用一个 seqlock：[0] 为序号（奇数=正在写），
+   读者读 [0] → 读全部字段 → 再读 [0]，两次相同且为偶数才算一帧有效快照。
+   字段：[0]=seq [1]=v_cmd [2]=v_ramp [3]=duty(0.01%) [4]=speed(counts/ms)
+        [5]=e_q8 [6]=ff(0.01%) [7]=integ_scale [8]=isr_tick [9]=gap_cyc
+        [10]=gap_max_cyc [11]=phase|estop<<8 */
+volatile int32_t car_dbg_mirror[12];
 static volatile int32_t duty_q8[MOTOR_COUNT];          /* [AI] R76: 0.01 %×256 (Q8)，ISR PI 状态（原 duty_q） */
 static volatile int32_t ff_q8[MOTOR_COUNT];            /* [AI] R76: 静摩擦前馈，0.01 %×256 */
 static struct motor_state motors[MOTOR_COUNT];
@@ -942,10 +976,32 @@ void car_control_step(uint32_t now)
             v_ramp[i] = wheel_speed[i];   /* hand off at the kick speed */
         } else if (encoder_sign[i] != 0 && duty_q8[i] > (int32_t)4000 * 256 &&
                    (win_raw[i] >= 20 || win_raw[i] <= -20) &&
-                   ((win_raw[i] > 0 ? 1 : -1) != encoder_sign[i])) {
-            encoder_sign[i] = (int8_t)(-encoder_sign[i]);   /* 预载极性错：翻转 */
-            sign_store_dirty = 1U;
+                   ((win_raw[i] > 0 ? 1 : -1) != encoder_sign[i]) &&
+                   /* [AI] R77: 必须"真的在转"才算矛盾。车顶墙/受憋时 duty 也会
+                      上到 40%+，但轮速≈0，此时窗增量只是噪声/被推出来的反向抖动；
+                      旧代码一次就翻，把预载极性翻坏并存盘 —— 实测表现是"撞一次墙
+                      这辆车就再也不走/乱走"，重启也没用（Flash 里是坏记录）。
+                      现在要求同时满足：滤波后转速 ≥10 counts/ms（≈1 rad/s，真的在
+                      转）且连续 5 个控制周期（50 ms）都矛盾才翻。 */
+                   (wheel_speed[i] >= 10 || wheel_speed[i] <= -10)) {
+            /* [AI] R80 2026-11-18 实测关闭**自动翻转**：架空/打滑/被顶住时
+               "占空比有符号、转速有符号但相反"同样成立，这条规则会把正确极性
+               翻反并落盘（Flash 里已经攒出 seq=1..8 八条互相矛盾的记录，
+               开机载入最后一条 = 错的）。极性只保留两条来源：
+                 ① 开机从 Flash 读（人工标定一次）；② encoder_sign==0 时 kick 自学。
+               这里只统计"出现矛盾"的次数供诊断，不再改 sign、不再 dirty。 */
+            if (sign_flip_pending[i] < 255U) sign_flip_pending[i]++;
+        } else if (sign_flip_pending[i] != 0U) {
+            sign_flip_pending[i] = 0U;   /* 矛盾不连续：清零，绝不累计跨事件 */
         }
+
+        /* [AI] R78: "有电不转"兜底 —— 极性错导致的死锁在这里解开。 */
+        /* [AI] R80 2026-11-18 实测回退：这条兜底会被"顶住/架空/轮胎打滑"误触发，
+           一旦把 encoder_sign 清 0，car_motor_output_gate 就走
+           encoder_uninitialized 分支 → **75% 开环直驱**，轮子飞转且极性学不回来
+           （架空时转速远超自检窗口）。极性错误改由 R77 的矛盾自检纠正，
+           不再用"清 0 重学"这种能把车踢飞的手段。 */
+        sign_stall_ms[i] = 0U;
     }
     /* [AI] R38: 四轮极性齐且"本次开机尚未落盘/有纠正" → 追加一条记录
      * （append-only，见 app_sign_store.c）。失败不重试（避免每 10ms 撞
@@ -1461,6 +1517,23 @@ void car_control_isr(void)
     TIM6->SR = (uint16_t)~TIM_SR_UIF;
     uint32_t isr_t0 = DWT->CYCCNT;      /* [AI]  R19: 占用率计时起点 */
 
+    /* [AI] R78 2026-11-17：积分步长按**实际经过时间**折算，不再假设"每拍 40 µs"。
+       实测：TIM6 硬件确实是 25 kHz（84 MHz / 3360，ARR=0x0D1F、PSC=0），
+       但 ISR 实际只被服务约 1 kHz（TIM6->SR 的 UIF 长期挂起，SWD 两次同会话
+       采样心跳 +287/300 ms）。原 PI 是纯积分器（duty += K·e），每拍固定增益，
+       于是占空比按 ISR 次数而不是按时间爬升 —— 被延迟 25 倍就等于增益掉 25 倍：
+       车"有电、有目标、慢慢挪"。这里用 DWT 周期数算 elapsed/40µs 的倍数，
+       把积分放大量补回来（25 kHz 正常服务时倍数=1，行为与旧版完全一致）。 */
+    static uint32_t isr_prev_cyc;
+    uint32_t isr_dt_cyc = (uint32_t)(isr_t0 - isr_prev_cyc);
+    isr_prev_cyc = isr_t0;
+    static uint32_t isr_gap_max;
+    if (isr_dt_cyc > isr_gap_max) isr_gap_max = isr_dt_cyc;
+    /* [AI] R80 修正：DWT 走**内核**时钟 168 MHz，40 µs = 6720 cycles。
+       旧值写 3360（把 TIM6 的 84 MHz 计时当成了内核时钟），于是正常运行时
+       integ_scale 恒为 2 —— 积分增益凭空翻倍，闭环必然超调自激。 */
+    uint32_t integ_scale = 1U;   /* 兼容旧字段：现在由 pi_scale 承担 */
+
     /* [AI]  急停快速路径: CAN 中断置位 → 本周期(≤40µs)立即刹车锁存（§7.1） */
     if (car_estop_fast_req != 0U) {
         car_estop_fast_req = 0U;
@@ -1508,6 +1581,14 @@ void car_control_isr(void)
 
     if (++win_cnt >= 25U) {              /* 1 ms: M/T 混合测速 + PI */
         win_cnt = 0U;
+        /* [AI] R81: PI 的真实周期尺度（正常 1 ms）。若 ISR 被延迟导致这一轮
+           实际跨了多毫秒，按毫秒数放大积分，物理增益不变。 */
+        static uint32_t last_pi_cyc;
+        uint32_t pi_dt = (uint32_t)(isr_t0 - last_pi_cyc);
+        last_pi_cyc = isr_t0;
+        uint32_t pi_scale = pi_dt / cyc_per_ms;
+        if (pi_scale == 0U) pi_scale = 1U;
+        if (pi_scale > 8U) pi_scale = 8U;
         for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
             int32_t sum = win_sum[i];
             win_sum[i] = 0;
@@ -1550,8 +1631,19 @@ void car_control_isr(void)
             /* [AI] R76: 误差升 Q8 域；增益 e/2+e/4 → e_q8/512+e_q8/1024，
                严格等价但积分器（duty_q8）亚 LSB 累加，不再有整型死区 */
             int32_t e_q8 = (v_ramp[i] << 8) - spd_q8;
-            duty_q8[i] += e_q8 / (SPEED_KP_DIV * 256) +
-                          e_q8 / (SPEED_KI_DIV * 256);
+            /* [AI] R79 抗饱和（conditional integration，标准做法）：
+               输出已经顶在限幅上、误差还在往同方向推时，**停止积分**，
+               否则积分器晒满，退饱和要等很久（旧版就是这种"迟钝"）。 */
+            {
+                int32_t step = (e_q8 * SPEED_KI_NUM) / SPEED_KI_DEN;
+                int32_t lim_q8_pre = (int32_t)MAX_DUTY_PERCENT * 100 * 256;
+                /* 抗饱和：已顶在限幅上、误差还要往上推时不再积分 */
+                uint8_t sat_pos = (uint8_t)(duty_q8[i] >= lim_q8_pre && e_q8 > 0);
+                uint8_t sat_neg = (uint8_t)(duty_q8[i] <= -lim_q8_pre && e_q8 < 0);
+                if (sat_pos == 0U && sat_neg == 0U) {
+                    duty_q8[i] += step * (int32_t)pi_scale;
+                }
+            }
             int32_t lim_q8 = (int32_t)MAX_DUTY_PERCENT * 100 * 256;
             if (duty_q8[i] > lim_q8) duty_q8[i] = lim_q8;
             if (duty_q8[i] < -lim_q8) duty_q8[i] = -lim_q8;
@@ -1560,17 +1652,43 @@ void car_control_isr(void)
                值是 car2 转述的 ~75%（待复测，台架首测项）。 */
             {
                 int32_t spd_abs = spd_q8 < 0 ? -spd_q8 : spd_q8;
+                int32_t tgt_abs = v_ramp[i] < 0 ? -v_ramp[i] : v_ramp[i];
+                /* [AI] R79: 相对判据 + 方向一致才给前馈（车被反推时不该顶） */
+                /* [AI] R79: 静止(≈0)必须算"同向" —— 用 <=0 会把静止判成负向，
+                   正目标下 same_dir=0，起步前馈在最需要的时刻永远不触发
+                   （实测：v_ramp=53、spd=0，ff 恒 0，duty 只能靠弱 PI 慢慢爬）。 */
+                uint8_t same_dir = (uint8_t)((spd_q8 > -64 && spd_q8 < 64) ||
+                                             ((spd_q8 > 0) == (v_ramp[i] > 0)));
                 if (v_cmd[i] == 0) {
                     ff_q8[i] = 0;
-                } else if (spd_abs < FF_STUCK_EPS_Q8) {
+                } else if (spd_abs < ((tgt_abs << 8) / FF_STUCK_TARGET_DIV) && same_dir) {
                     ff_q8[i] = (v_cmd[i] > 0 ? 1 : -1) *
-                               (FF_BREAKAWAY_DUTY * 256);
+                               ((int32_t)FF_BREAKAWAY_DUTY * 256);
                 } else if (ff_q8[i] != 0) {
                     ff_q8[i] -= ff_q8[i] >> 3;
                     if (ff_q8[i] < 32 && ff_q8[i] > -32) ff_q8[i] = 0;
                 }
             }
         }
+    }
+
+    /* [AI] R79: 首轮控制量整帧镜像（seqlock，同一趟写完再放序号龟） */
+    {
+        static uint32_t tick;
+        tick++;
+        car_dbg_mirror[0] = (int32_t)(tick * 2U + 1U);   /* 奇数：写入中 */
+        car_dbg_mirror[1] = v_cmd[0];
+        car_dbg_mirror[2] = v_ramp[0];
+        car_dbg_mirror[3] = duty_q8[0] >> 8;
+        car_dbg_mirror[4] = wheel_speed[0];
+        car_dbg_mirror[5] = (v_ramp[0] << 8) - wheel_speed_q8[0];
+        car_dbg_mirror[6] = ff_q8[0] >> 8;
+        car_dbg_mirror[7] = (int32_t)integ_scale;
+        car_dbg_mirror[8] = (int32_t)tick;
+        car_dbg_mirror[9] = (int32_t)isr_dt_cyc;
+        car_dbg_mirror[10] = (int32_t)isr_gap_max;
+        car_dbg_mirror[11] = (int32_t)motors[0].phase | ((int32_t)estop_latched << 8);
+        car_dbg_mirror[0] = (int32_t)(tick * 2U);        /* 偶数：快照有效 */
     }
 
     for (unsigned i = 0; i < MOTOR_COUNT; ++i) {
